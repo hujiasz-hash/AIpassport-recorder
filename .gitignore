@@ -1,2 +1,7 @@
-.DS_Store
-*.bak-*
+# Wi-Fi 凭据
+firmware/**/wifi_test_secret.h
+
+# 录音与缓存 dump（个人数据）
+*.ogg
+*.bin
+listen/
