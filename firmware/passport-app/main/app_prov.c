@@ -6,6 +6,7 @@
 #include "app_config.h"
 #include "app_error.h"
 #include "app_net.h"
+#include "app_upload.h"
 #include "esp_event.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
@@ -192,6 +193,8 @@ static esp_err_t save_post(httpd_req_t *req) {
 
     // 不等结果：连 Wi-Fi 要几秒，页面自己轮询 /status。
     app_net_apply_credentials();
+    // 之前可能因为没 token 把上传停了，配完立刻恢复并踢一轮，不用等下一个 60 秒周期。
+    app_upload_set_enabled(true);
 
     httpd_resp_set_type(req, "application/json");
     char out[96];

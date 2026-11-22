@@ -1,7 +1,7 @@
 #!/bin/sh
 # curl 冒烟测试：用真实 HTTP 客户端验证服务端基本行为。
 # 用法：sh tools/stage3/curl_smoke.sh <base_url> <token> <dev8>
-# 例：  sh tools/stage3/curl_smoke.sh http://127.0.0.1:8000 tok-xxx 98c377f4
+# 例：  sh tools/stage3/curl_smoke.sh http://127.0.0.1:8000 tok-xxx 77f452f8
 set -u
 
 BASE=${1:?用法: curl_smoke.sh <base_url> <token> <dev8>}

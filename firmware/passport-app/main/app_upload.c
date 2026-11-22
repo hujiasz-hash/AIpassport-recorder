@@ -392,8 +392,15 @@ static void run_once(void) {
         return;
     }
     if (!cfg->token[0]) {
-        app_error_report(APP_E301_TOKEN_INVALID, APP_SRC_UPLOAD, "no token configured");
-        s_state = APP_UP_WAITING;
+        // 报错一次就够，然后停手。app_error_report 对同一错误码的去重窗口只有 5 秒，
+        // 而上传任务每 60 秒跑一轮，所以不这样做的话它会每分钟报一次 E301，
+        // 整份日志能被一条"没填 token"刷满，真问题反而看不见。
+        // 等用户在配网页填了 token（app_config_set_upload 会把 s_enabled 打开）再恢复。
+        app_error_report(APP_E301_TOKEN_INVALID, APP_SRC_UPLOAD,
+                         "no token configured, upload paused until cfg updated");
+        app_log(TAG, "no token, pause upload");
+        s_state = APP_UP_IDLE;
+        s_enabled = false;
         return;
     }
     if (!app_net_wait_time(20000)) {

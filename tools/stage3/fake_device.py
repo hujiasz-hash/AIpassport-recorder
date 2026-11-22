@@ -8,7 +8,7 @@
     # 1. 从缓存分区 dump 拆出某会话（可选，不给则随机造 Ogg）
     python3 tools/stage3/fake_device.py \
         --cache cache.bin --session 5891708b \
-        --url https://xxx.5ddd.com:8000 --token <token> --dev 98c377f4
+        --url https://xxx.5ddd.com:8000 --token <token> --dev 77f452f8
 
     # 2. 不用缓存，随机造一段 Ogg 直接上传（先验证链路）
     python3 tools/stage3/fake_device.py \

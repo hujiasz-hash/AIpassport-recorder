@@ -111,7 +111,7 @@ date: 2026-11-22
 
 线格式已按实现定稿（`server/server.py`）：
 
-- **session_id 固定 28 字符**：`<dev8>-<ts10>-<rand8>`，如 `98c377f4-1763800000-9f3e2a11`。`dev8` 是 MAC 低 32 位十六进制，`ts10` 是录音开始的 Unix 秒，`rand8` 是缓存里的 32 位会话号。服务端正则闭合校验，路径只由它和它推导的日期拼成，不做字符串清洗。`ts` 超出 `[now-90d, now+1d]` 拒绝。
+- **session_id 固定 28 字符**：`<dev8>-<ts10>-<rand8>`，如 `77f452f8-1763800000-9f3e2a11`。`dev8` 是 MAC **后** 4 字节（第 3..6 字节）的十六进制，等于开机日志里的 `dev=`，`ts10` 是录音开始的 Unix 秒，`rand8` 是缓存里的 32 位会话号。服务端正则闭合校验，路径只由它和它推导的日期拼成，不做字符串清洗。`ts` 超出 `[now-90d, now+1d]` 拒绝。
 - **端点**：`PUT /v1/upload/<session_id>` 分段上传；`GET` 同路径查状态；`GET /healthz` 健康检查。
 - **请求头**（也接受 query 参数兜底，防止中继改写）：`Authorization: Bearer <token>`、`Content-Length`（必需，不支持 chunked）、`X-Offset`、`X-Seq`（仅日志）、`X-Final`、`X-Total-Len`（final 时必需）。
 - **每个响应都带 `received`**，设备只以它为准推进本地读指针；不跟"已发送"走。这样 offset 落后和超前用同一条赋值语句收敛。
