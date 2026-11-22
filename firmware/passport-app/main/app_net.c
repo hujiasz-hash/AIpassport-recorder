@@ -37,12 +37,17 @@ static volatile bool s_manual_connect;  // 主动切换凭据期间，忽略这�
 static const char *TAG = "net";
 
 static void got_ip_handler(void *arg, esp_event_base_t base, int32_t id, void *data) {
-    (void)arg; (void)base; (void)id; (void)data;
+    (void)arg; (void)base; (void)id;
     xEventGroupSetBits(s_eg, BIT_IP);
     s_state = APP_NET_CONNECTED;
     s_fail_count = 0;
     s_retry_delay_ms_div = 0;
     s_last_reason = 0;
+
+    // 把拿到的 IP / 网关 / 掩码打出来，上传连不上时第一眼就能判断是不是网段不对。
+    const ip_event_got_ip_t *ev = (const ip_event_got_ip_t *)data;
+    app_log(TAG, "got ip " IPSTR " mask " IPSTR " gw " IPSTR,
+            IP2STR(&ev->ip_info.ip), IP2STR(&ev->ip_info.netmask), IP2STR(&ev->ip_info.gw));
 }
 
 static void retry_cb(void *arg) {
@@ -259,4 +264,20 @@ void app_net_now_iso(char *buf, size_t cap) {
 
 void app_net_set_power_save(bool on) {
     esp_wifi_set_ps(on ? WIFI_PS_MIN_MODEM : WIFI_PS_NONE);
+}
+
+bool app_net_ip_str(char *buf, size_t cap) {
+    if (!s_netif || cap < 16) return false;
+    esp_netif_ip_info_t ip;
+    if (esp_netif_get_ip_info(s_netif, &ip) != ESP_OK || ip.ip.addr == 0) return false;
+    snprintf(buf, cap, IPSTR, IP2STR(&ip.ip));
+    return true;
+}
+
+bool app_net_gw_str(char *buf, size_t cap) {
+    if (!s_netif || cap < 16) return false;
+    esp_netif_ip_info_t ip;
+    if (esp_netif_get_ip_info(s_netif, &ip) != ESP_OK || ip.gw.addr == 0) return false;
+    snprintf(buf, cap, IPSTR, IP2STR(&ip.gw));
+    return true;
 }

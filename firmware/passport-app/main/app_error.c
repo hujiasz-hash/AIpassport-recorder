@@ -79,7 +79,10 @@ void app_log(const char *tag, const char *fmt, ...) {
 void app_error_report(app_err_t err, app_src_t src, const char *fmt, ...) {
     int64_t now = esp_timer_get_time();
 
-    char detail[160] = "";
+    // 320 而不是 160：上传失败的 detail 要同时放下 session_id（28）、errno 文本、
+    // 设备 IP、网关、目标 URL（最长 100+10），160 字节会把 URL 从中间截断，
+    // 恰好把最该看的那一段砍掉。
+    char detail[320] = "";
     if (fmt) {
         va_list ap;
         va_start(ap, fmt);

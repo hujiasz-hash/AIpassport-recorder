@@ -1,5 +1,6 @@
 #include "app_upload.h"
 
+#include <errno.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -27,6 +28,10 @@
 // 空闲时的轮询周期。设计文档 7.2 定的 60 s：录音时每 60 s 开一次连接批量发完。
 #define IDLE_PERIOD_MS (60 * 1000)
 
+// 上传失败后的退避上限。连不上时（网段不通、服务端没起）每 60 s 白等一个 20 s
+// 连接超时没有意义，还要反复唤醒 Wi-Fi 耗电：逐轮翻倍到 10 分钟。
+#define MAX_BACKOFF_MS (10 * 60 * 1000)
+
 // 同一个会话连续冲突 3 次就放弃本轮，避免坏数据把设备卡死在重试循环里。
 #define MAX_CONFLICTS 3
 
@@ -35,6 +40,7 @@
 
 static TaskHandle_t s_task;
 static SemaphoreHandle_t s_kick;
+static uint32_t s_backoff_ms;   // 0 表示正常周期，非 0 是失败后的等待时长
 static volatile bool s_enabled = true;
 static volatile app_upload_state_t s_state = APP_UP_IDLE;
 static volatile uint32_t s_total_bytes;
@@ -50,6 +56,7 @@ typedef struct {
     char status[24];    // 服务端返回的 status 字符串
     char message[40];   // 服务端返回的 error 字段
     esp_err_t err;      // 连接层错误码
+    int sys_errno;      // 连接层失败时 socket 层的 errno，0 表示没取到
 } resp_t;
 
 // 从 JSON 响应里抠字段。服务端 JSON 是紧凑格式且字段顺序固定，不做完整解析器：
@@ -146,6 +153,8 @@ static void http_put(const char *url, const char *token, int offset, int seq,
     esp_err_t err = esp_http_client_open(c, (int)len);
     if (err != ESP_OK) {
         r->err = err;
+        // errno 只有这一瞬间有效，出了这个函数就被别的调用覆盖了，必须立刻存。
+        r->sys_errno = errno;
         esp_http_client_cleanup(c);
         return;
     }
@@ -195,6 +204,15 @@ static void http_put(const char *url, const char *token, int offset, int seq,
 static void report_net_failure(const resp_t *r, const char *sid, int offset) {
     esp_err_t e = r->err;
     const char *name = esp_err_to_name(e);
+    // errno 比 esp_err_t 具体得多：ENETUNREACH=网络不可达（通常是设备和服务端不在
+    // 同一网段），ECONNREFUSED=端口没人听，ETIMEDOUT=被防火墙静默丢掉。
+    // 只打 esp_err_to_name 会把这三种情况混成同一个 ESP_ERR_HTTP_CONNECT。
+    const char *eno = r->sys_errno ? strerror(r->sys_errno) : "-";
+    // "我在哪、要去哪"是判断网段问题的第一步，比错误码本身更重要。
+    char myip[16] = "?", gw[16] = "?";
+    app_net_ip_str(myip, sizeof myip);
+    app_net_gw_str(gw, sizeof gw);
+    const char *dst = app_config_get()->url;
 
     if (e == ESP_ERR_ESP_TLS_CANNOT_RESOLVE_HOSTNAME) {
         app_error_report(APP_E200_DNS_FAIL, APP_SRC_UPLOAD, "%s off=%d %s", sid, offset, name);
@@ -208,11 +226,14 @@ static void report_net_failure(const resp_t *r, const char *sid, int offset) {
         e == ESP_ERR_ESP_TLS_CANNOT_CREATE_SOCKET ||
         e == ESP_ERR_HTTP_CONNECT) {
         // 域名解析成功但连不上：端口不通、中继拒绝或对端没起服务。
-        app_error_report(APP_E202_TIMEOUT, APP_SRC_UPLOAD, "%s off=%d connect failed %s",
-                         sid, offset, name);
+        app_error_report(APP_E202_TIMEOUT, APP_SRC_UPLOAD,
+                         "%s off=%d connect failed %s errno=%d(%s) ip=%s gw=%s -> %s",
+                         sid, offset, name, r->sys_errno, eno, myip, gw, dst);
         return;
     }
-    app_error_report(APP_E202_TIMEOUT, APP_SRC_UPLOAD, "%s off=%d %s", sid, offset, name);
+    app_error_report(APP_E202_TIMEOUT, APP_SRC_UPLOAD,
+                     "%s off=%d %s errno=%d(%s) ip=%s gw=%s -> %s",
+                     sid, offset, name, r->sys_errno, eno, myip, gw, dst);
 }
 
 static void set_summary(const char *fmt, ...) {
@@ -384,12 +405,13 @@ static bool upload_one(const app_session_t *s) {
 }
 
 // 跑一轮：从最旧的会话开始，成功就继续下一个，出错就停下来等下一轮。
-static void run_once(void) {
-    if (!s_enabled) return;
+// 返回 true 表示这一轮有进展（传完、没数据可传），false 表示白跑一趟要退避。
+static bool run_once(void) {
+    if (!s_enabled) return true;
     const app_config_t *cfg = app_config_get();
     if (!cfg->ssid[0] || !cfg->url[0]) {
         s_state = APP_UP_IDLE;
-        return;
+        return true;
     }
     if (!cfg->token[0]) {
         // 报错一次就够，然后停手。app_error_report 对同一错误码的去重窗口只有 5 秒，
@@ -401,11 +423,11 @@ static void run_once(void) {
         app_log(TAG, "no token, pause upload");
         s_state = APP_UP_IDLE;
         s_enabled = false;
-        return;
+        return true;   // 不是网络问题，别退避
     }
     if (!app_net_wait_time(20000)) {
         s_state = APP_UP_WAITING;
-        return;
+        return false;
     }
 
     int n = app_store_list(&s_list, 1);
@@ -415,7 +437,7 @@ static void run_once(void) {
         // 已经没有待传的了，把已完成会话占的扇区还回去。缓存只有 3.6 MB，
         // 不回收的话录满一次就永久 E500。
         app_store_reclaim();
-        return;
+        return true;
     }
 
     s_state = APP_UP_RUNNING;
@@ -433,17 +455,28 @@ static void run_once(void) {
         set_summary("等待上传 %u KB", (unsigned)(s_list.bytes / 1024));
     }
     app_log(TAG, "round done ok=%d state=%d summary=%s", (int)ok, (int)s_state, s_summary);
+    return ok;
 }
 
 static void upload_task(void *arg) {
     (void)arg;
     for (;;) {
-        // 有 kick 就立刻跑，没有就等一个周期。
-        if (xSemaphoreTake(s_kick, pdMS_TO_TICKS(IDLE_PERIOD_MS)) == pdTRUE) {
+        // 有 kick 就立刻跑，没有就等一个周期。基础周期 60 s，失败后逐轮翻倍，
+        // 最高 10 分钟：连不上时不值得每 60 s 就白等一个 20 s 连接超时。
+        uint32_t wait_ms = s_backoff_ms ? s_backoff_ms : IDLE_PERIOD_MS;
+        if (xSemaphoreTake(s_kick, pdMS_TO_TICKS(wait_ms)) == pdTRUE) {
             // 连按几下只跑一轮：把队列里堆积的 token 清掉。
             while (xSemaphoreTake(s_kick, 0) == pdTRUE) {}
         }
-        run_once();
+        bool progressed = run_once();
+        if (progressed) {
+            s_backoff_ms = 0;
+        } else if (s_backoff_ms == 0) {
+            s_backoff_ms = IDLE_PERIOD_MS;
+        } else if (s_backoff_ms < MAX_BACKOFF_MS) {
+            s_backoff_ms *= 2;
+            if (s_backoff_ms > MAX_BACKOFF_MS) s_backoff_ms = MAX_BACKOFF_MS;
+        }
     }
 }
 
@@ -469,8 +502,11 @@ void app_upload_kick(void) {
 }
 
 void app_upload_set_enabled(bool on) {
+    // 只在"从关到开"时踢一次。每轮都 give 会让失败后立刻重跑：实测到过一次
+    // 失败后 2 ms 就重新 begin，秒级空转烧电、刷爆服务端。
+    bool was = s_enabled;
     s_enabled = on;
-    if (on) app_upload_kick();
+    if (on && !was) app_upload_kick();
 }
 
 app_upload_state_t app_upload_state(void) {

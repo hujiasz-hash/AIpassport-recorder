@@ -213,13 +213,11 @@ void app_main(void) {
             net_started = true;
         }
 
-        // 联网后每 60 秒踢一次上传（上传任务自身也有周期，这里保证刚联网时尽快开始）。
-        if (net_started && app_net_state() == APP_NET_CONNECTED) {
-            int64_t now = esp_timer_get_time();
-            if (now - last_upload_kick > 60LL * 1000 * 1000) {
-                app_upload_kick();
-                last_upload_kick = now;
-            }
+        // 刚联网时踢一次就够了。之后上传任务自己按周期跑，失败还有退避；
+        // 这里再每 60 s 踢一次会把退避打断，退化成固定 60 s 硬重试。
+        if (net_started && !last_upload_kick && app_net_state() == APP_NET_CONNECTED) {
+            app_upload_kick();
+            last_upload_kick = esp_timer_get_time();
         }
 
         error_tick();

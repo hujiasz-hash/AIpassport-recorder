@@ -161,6 +161,53 @@ docker compose logs -f | grep -E 'X-Offset|Authorization'
 
 ## 5. 排错
 
+### 5.1 设备连不上接收服务时，怎么一次定位
+
+设备的错误日志已经把判断材料都打齐了，看 `ERR code=202` 那一行：
+
+```
+E app: ERR code=202 src=upload detail="<sid> off=0 connect failed ESP_ERR_HTTP_CONNECT
+      errno=119(Connection already in progress) ip=10.169.1.62 gw=10.169.1.1 -> http://10.169.1.177:8000"
+```
+
+| 字段 | 含义 |
+| --- | --- |
+| `ip=` / `gw=` | 设备自己拿到的地址和网关。先确认它和目标服务端是不是同一网段 |
+| `-> http://...` | 设备要去的完整地址，和 `appcfg` 里的 `url` 一致 |
+| `errno=119` (`EINPROGRESS`) | SYN 发出去了，等到超时都没收到任何回包。**不是拒绝**，是包被吞了 |
+| `errno=113` (`EHOSTUNREACH`) | 没有到该网段的路由 |
+| `errno=111` (`ECONNREFUSED`) | 到得了主机，但那个端口没人监听 |
+| `errno=110` (`ETIMEDOUT`) | 被防火墙或中继静默丢弃 |
+
+`errno=119` 最容易被误读：它看起来像"连接正在进行"，实际是 lwIP 里 `connect()`
+超时的表现 —— `esp-tls` 把 `select()` 超时记成了这个值。
+
+对应动作：`ECONNREFUSED` 查服务端有没有起；`EINPROGRESS`/`ETIMEDOUT` 查两台机器之间
+是不是根本不通（见 5.2）。
+
+### 5.2 同网段却不通：AP 客户端隔离
+
+**已在企业 Wi-Fi 上实测遇到**：设备拿到 `10.169.1.62`，Mac 是 `10.169.1.177`，
+掩码相同、网关相同、同一个 BSSID、同一个信道 4，但：
+
+- Mac `curl --noproxy '*' --interface en0 http://10.169.1.62:9999` → 超时
+- 换成一个**肯定没人监听**的 9999 端口也超时。如果只是端口没开，应该是秒回
+  `Connection refused`；超时说明 SYN 就没送到设备
+- `arp -an` 里始终没有设备的 MAC；`ping -b en0` 也不通
+- 服务端日志一条请求都没收到
+
+结论：**这是 AP 的客户端隔离（client isolation / AP isolation），不是固件问题。**
+企业 Wi-Fi 默认开这个，同一 AP 下的终端互相看不见。
+
+绕法（按可行性排）：
+1. 用一台自己可控的路由/手机热点，把 Mac 和设备都放上去。
+2. 设备连服务端所在的 NAS 同网段（NAS 和 Mac 不同网段时，隔离不影响设备→NAS）。
+3. 走外网（FN Connect / DDNS），但要先验设计文档 7.1 那三项。
+
+**不要**在这上面怀疑固件：只要 `got ip` 和 `errno` 都对得上，设备侧就是正常的。
+
+### 5.3 其它常见现象
+
 | 现象 | 原因 | 处理 |
 | --- | --- | --- |
 | 401 unauthorized | tokens.json 没加载或 token 错 | 看启动日志 `loaded N device token(s)`；确认 `TOKENS_FILE` 挂载路径 |

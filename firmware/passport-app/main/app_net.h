@@ -45,3 +45,8 @@ void app_net_now_iso(char *buf, size_t cap);
 
 // 是否把 Wi-Fi 停在省电模式（上传时会临时切到 WIFI_PS_NONE）。
 void app_net_set_power_save(bool on);
+
+// 当前设备 IP / 网关，点分十进制写进 buf。没连上返回 false。
+// 上传连不上时把这两个打到 error 日志里，一眼能看出是不是网段不对、网关不对。
+bool app_net_ip_str(char *buf, size_t cap);
+bool app_net_gw_str(char *buf, size_t cap);
