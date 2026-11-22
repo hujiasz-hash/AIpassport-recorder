@@ -1,0 +1,88 @@
+# AI Passport 产品固件默认配置。
+# 起点是官方工程（FoloToy/ai-passport e85197d），在其基础上加 Wi-Fi/HTTP/BluFi。
+
+# --- 目标芯片 ---
+CONFIG_IDF_TARGET="esp32c3"
+# ESP32-C3 无 PSRAM，不设 SPIRAM。
+
+# --- Flash ---
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+# 固定镜像头里的 8MB，关闭 detect，便于 merge-bin 与量产烧录。
+CONFIG_ESPTOOLPY_HEADER_FLASHSIZE_UPDATE=n
+
+# --- 分区表（自定）---
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
+
+# --- 控制台：C3 原生 USB-Serial/JTAG ---
+# 不用 UART0：其默认 TX=GPIO21 与背光冲突。
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
+
+# --- 日志 ---
+# 默认 Info：我们要靠串口日志定位问题。单条限长避免刷屏。
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+CONFIG_LOG_MAXIMUM_LEVEL_INFO=y
+CONFIG_LOG_TIMESTAMP_SOURCE_RTOS=y
+
+# --- LVGL ---
+CONFIG_LV_COLOR_DEPTH_16=y
+CONFIG_LV_DEF_REFR_PERIOD=20
+CONFIG_LV_FONT_MONTSERRAT_14=y
+CONFIG_LV_FONT_MONTSERRAT_20=y
+# 中文界面需要 CJK 字体（约 1 MB 字形表，占 flash 不占 RAM）。
+# 内置 CJK 字体是固定字表，缺常用字（实测方框），改用自己生成的 lv_font_ui_14/20，故关掉它省 160 KB。
+# CONFIG_LV_FONT_SOURCE_HAN_SANS_SC_14_CJK is not set
+CONFIG_LV_FONT_DEFAULT_MONTSERRAT_14=y
+# 用系统堆，内置 24KB 池在复杂蒙版时会耗尽并死循环（真机已复现）。
+CONFIG_LV_USE_CLIB_MALLOC=y
+
+# --- 系统 ---
+CONFIG_FREERTOS_HZ=1000
+
+# --- Bluetooth：整块关掉 ---
+# 配网改成"设备开热点 + 内置网页"，不再需要蓝牙。
+# BT 控制器约 30 KB + NimBLE 接收池约 20 KB，全部省下来。
+# C3 无 PSRAM，内部 RAM 是硬约束，这笔账很关键。
+# CONFIG_BT_ENABLED is not set
+
+# --- Wi-Fi ---
+CONFIG_ESP_WIFI_ENABLED=y
+# 配网阶段开 SoftAP（手机连设备热点），所以 AP/APSTA 模式必须编进来。
+# esp_netif AP + DHCP 服务器默认已开，靠这两个符号保证。
+CONFIG_ESP_WIFI_SOFTAP_SUPPORT=y
+CONFIG_LWIP_DHCPS=y
+# 静态接收缓冲每个 1600 字节，是内部 RAM 里最大的一笔常驻占用（默认 10 个 = 16 KB）。
+# 降到 6 个仍有 9.6 KB 接收窗口，12 kbps 音频上传远用不满。
+CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=6
+# 管理帧短缓冲与动态收发缓冲同步下调，单个连接用不到 32 个。
+CONFIG_ESP_WIFI_MGMT_SBUF_NUM=16
+# 录音 + Wi-Fi 同时跑，TX 缓冲给足，避免上传时丢包重传。
+CONFIG_ESP_WIFI_STATIC_TX_BUFFER_NUM=16
+CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM=16
+CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=16
+CONFIG_ESP_WIFI_TX_BA_WIN=6
+# 省电由固件在运行时开关，默认开最小调制解调器省电。
+CONFIG_ESP_WIFI_SLP_DEFAULT_MIN_ACTIVE_TIME=20
+
+# --- HTTP 客户端 ---
+CONFIG_ESP_HTTP_CLIENT_ENABLE_HTTPS=y
+# 内置证书包：FN Connect 用公共 CA 证书，设备侧校验这一段。
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
+
+# --- SNTP ---
+CONFIG_LWIP_SNTP_MAX_SERVERS=3
+CONFIG_LWIP_SNTP_UPDATE_DELAY=3600000
+
+# --- 主任务栈 ---
+# app_main 里调用的初始化链较深（LVGL、Wi-Fi、HTTP server），放大到 8 KB。
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+
+# --- 体积 ---
+# 2 MB OTA 分区只剩 4% 余量，-Os 换空间；Opus 编码余量仍有千倍。
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+# 证书包用 CMN（~50 个常见 CA）而非 FULL（~200 个）：NAS 走自签/FN Connect 中继，
+# 常见 CA 足够覆盖；要换自签证书再单开 CUSTOM_CERTIFICATE_BUNDLE。
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_CMN=y
+

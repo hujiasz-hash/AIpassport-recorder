@@ -57,15 +57,18 @@ git checkout e85197d56abe92c35a1cfb84fad85fba2545c9cc
 
 实际路径取决于目录布局。如果 `third_party` 放在别处，修改该 CMake 中的 `OPUS_DIR`。编译参数已在 CMake 中设定：`FIXED_POINT=1`、`VAR_ARRAYS`，C3 无 FPU 必须定点。
 
-## 5. 配置 Wi-Fi（仅阶段 1 需要）
+## 5. 配置 Wi-Fi（产品固件不需要写代码）
 
-阶段 1 的 `stage1_main.c` 通过 `wifi_test_secret.h` 读取测试 Wi-Fi：
+产品固件（`firmware/passport-app`）用**网页配网**，不装 App、不写死密码：
 
-```sh
-cp firmware/stage1-opus/main/wifi_test_secret.h.example <副本>/main/wifi_test_secret.h
-```
+1. 首次开机（NVS 里没有配置）自动进入配网页，屏幕显示热点名 `AIPassport-xxxx`（后 4 位是设备号）。
+2. 手机 Wi-Fi 连这个热点（**无密码**）。
+3. 手机浏览器打开 `192.168.4.1`，填 Wi-Fi 名称、密码、NAS 地址、Token，点保存。
+4. 页面自动告诉你连没连上；成功后可断开热点。设备下次开机直接走 STA。
 
-填入自己的 SSID 和密码。**不要提交此文件**，仓库的 `.gitignore` 已排除它。
+配网期间设备是 APSTA 模式，热点和 STA 可同时工作。配完会自动关热点。
+
+阶段 1 的 `stage1_main.c` 仍用编译期 `wifi_test_secret.h`，那是测试代码，不要提交该文件。
 注意：ESP32-C3 只支持 2.4 GHz，`_5G` 结尾的 SSID 连不上。
 
 ## 6. 编译、烧录
@@ -128,6 +131,7 @@ python tools/stage2/power_loss_test.py /dev/cu.usbmodem* ./pl verify
 
 ## 9. 已知问题和注意事项
 
+- **USB-JTAG 卡死、串口全是 0 字节且 esptool 连不上**：C3 的 USB-Serial/JTAG 偶发会停在死会话里，USB 仍能枚举（`ioreg` 里能看到 `USB JTAG/serial debug unit`）。此时拔掉 USB 重新插，再跑 `esptool.py --chip esp32c3 -p <端口> read_mac` 验证能进 stub。2026-11-22 遇到过一次。
 - **屏幕停在 "STAGE2 boot"**：多半是缓存已满。录音循环只在每 10 秒时刷新屏幕，错误（E500）只写串口，不显示在屏幕上。此时先擦除缓存分区。
 - **企业文件标记工具（Windows）**：会给新写入的 PNG 注入 tEXt 标签，导致 lvgl 组件 CHECKSUM 校验失败。Windows 上可能需要临时绕过，Mac 上通常不存在此问题。
 - **包管理**：内网 pip 源需要认证。需要的主机端工具尽量只用标准库，本仓库的脚本都不依赖第三方包（串口监听除外，需要 `pyserial`，IDF Python 环境已包含）。

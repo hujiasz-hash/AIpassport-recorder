@@ -1,5 +1,17 @@
 # Wi-Fi 凭据
 firmware/**/wifi_test_secret.h
+firmware/**/device_secret.h
+
+# ESP-IDF 构建产物与本地配置（sdkconfig 由 sdkconfig.defaults 生成，含机器相关取值）
+firmware/**/build/
+firmware/**/sdkconfig
+firmware/**/sdkconfig.old
+firmware/**/managed_components/
+firmware/**/dependencies.lock
+firmware/passport-app/third_party/
+
+# macOS
+.DS_Store
 
 # 接收服务凭据与运行数据（都不入库）
 server/tokens.json
