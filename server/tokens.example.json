@@ -1,0 +1,6 @@
+{
+  "_comment": "复制为 tokens.json，换成真实值。token 至少 32 字符随机串，一机一 token。dev8 是设备 MAC 的低 32 位十六进制。",
+  "devices": {
+    "98c377f4": "REPLACE-WITH-32-CHAR-RANDOM-TOKEN-AAAA"
+  }
+}

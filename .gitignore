@@ -1,6 +1,11 @@
 # Wi-Fi 凭据
 firmware/**/wifi_test_secret.h
 
+# 接收服务凭据与运行数据（都不入库）
+server/tokens.json
+server/data/
+**/__pycache__/
+
 # 录音与缓存 dump（个人数据）
 *.ogg
 *.bin

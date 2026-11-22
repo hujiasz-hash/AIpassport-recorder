@@ -1,0 +1,30 @@
+services:
+  upload:
+    build: .
+    container_name: aipass-upload
+    restart: unless-stopped
+    # 有状态服务，固定单副本。不要 scale。
+    ports:
+      # 只在内网/回环暴露给 FN Connect，不要直接映射到公网。
+      - "8000:8000"
+    environment:
+      DATA_DIR: /data
+      PORT: "8000"
+      TOKENS_FILE: /run/secrets/tokens.json
+      TZ: Asia/Shanghai
+    volumes:
+      # 必须是 NAS 本地文件系统的 bind mount（ext4/btrfs）。
+      # 不要挂在 SMB/NFS 共享上：fsync 和 rename 的原子性在那里不可靠。
+      - ./data:/data:rw
+      - ./tokens.json:/run/secrets/tokens.json:ro
+    healthcheck:
+      test: ["CMD", "python3", "-c",
+             "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/healthz',timeout=3).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "3"

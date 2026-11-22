@@ -25,7 +25,11 @@ firmware/
     main/audio_cache.c、audio_cache.h、stage2_main.c
     partitions.csv
 tools/stage2/                      # 主机端脚本
-  parse_cache.py、check_ogg.py、serial_watch.py
+  parse_cache.py、check_ogg.py、serial_watch.py、power_loss_test.py
+server/                            # 阶段 3 NAS 接收服务（Python 标准库）
+  server.py、Dockerfile、docker-compose.yml、tokens.example.json
+tools/stage3/                      # 阶段 3 测试与模拟设备
+  e2e_test.py、curl_smoke.sh、fake_device.py
 ```
 
 ## 3. 获取官方工程并覆盖我们的文件
@@ -103,10 +107,38 @@ python tools/stage2/serial_watch.py <端口> serial.log <秒数>
 
 脚本会在端口断开后自动重连，适合在复位和掉电测试时使用。
 
+**ESP32-C3 的坑**：它用的是 USB-Serial/JTAG，DTR 接 EN（复位）、RTS 接 GPIO9（下载模式）。pyserial 默认打开端口会把两条线拉高，设备立刻掉进 `waiting for download`，日志只剩一行 `ESP-ROM`。脚本里已显式 `dtr=False`、`rts=False`，自己写脚本时也要这样。
+
+## 8.1 断电测试
+
+`tools/stage2/power_loss_test.py` 负责前后的取证，中间的拔电动作由人做。
+
+```sh
+# 1. 擦除缓存（会删所有已录数据，必须加 --yes）
+python tools/stage2/power_loss_test.py /dev/cu.usbmodem* ./pl --yes erase
+
+# 2. 抓日志，等你拔电（连续 8 秒无输出即判断已断电）
+python tools/stage2/power_loss_test.py /dev/cu.usbmodem* ./pl record
+
+# 3. 重新上电后校验：抓启动日志 + 读回缓存 + 拆分会话
+python tools/stage2/power_loss_test.py /dev/cu.usbmodem* ./pl verify
+```
+
+真实断电只能用拔 USB 或断电池来做，软件复位（RTS）模拟不了。2026-11-22 已实测通过，结果见设计文档进度记录。
+
 ## 9. 已知问题和注意事项
 
 - **屏幕停在 "STAGE2 boot"**：多半是缓存已满。录音循环只在每 10 秒时刷新屏幕，错误（E500）只写串口，不显示在屏幕上。此时先擦除缓存分区。
 - **企业文件标记工具（Windows）**：会给新写入的 PNG 注入 tEXt 标签，导致 lvgl 组件 CHECKSUM 校验失败。Windows 上可能需要临时绕过，Mac 上通常不存在此问题。
 - **包管理**：内网 pip 源需要认证。需要的主机端工具尽量只用标准库，本仓库的脚本都不依赖第三方包（串口监听除外，需要 `pyserial`，IDF Python 环境已包含）。
 - **录音数据**：录音文件属于个人数据，不入库。
-- 官方仓库的 `assets/` 下部分图片在本地显示为已修改（由企业文件标记工具造成），不要提交这些改动。
+
+## 10. NAS 接收服务
+
+见 [nas-deploy.md](nas-deploy.md)。本机验证不需要 NAS：
+
+```sh
+python3 tools/stage3/e2e_test.py                              # 44 条用例
+python3 tools/stage3/fake_device.py --url http://127.0.0.1:18081 \
+    --token <token> --dev <dev8> --synthetic                  # 模拟设备
+```

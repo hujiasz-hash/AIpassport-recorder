@@ -1,8 +1,8 @@
 ---
 title: AI Passport 录音上传固件 — 设计文档
-version: v0.4
+version: v0.5
 author: 胡嘉
-date: 2026-11-19
+date: 2026-11-22
 ---
 
 # AI Passport 录音上传固件 — 设计文档
@@ -14,6 +14,7 @@ date: 2026-11-19
 | v0.2 | 2026-11-19 | 胡嘉 | 录音改为短按切换；缓存改为“先落盘再上传”单一路径，去掉 ring buffer；上传改为长连接；中转方案与第 4 节解耦；补电池、时间同步、RAM 预算、错误码；Opus 验证提为第一个里程碑；列出待输入项 |
 | v0.3 | 2026-11-19 | 胡嘉 | 按官方仓库填入硬件参数（8 MB flash、无 PSRAM、520 mAh、三键、IDF 5.5.3）；中转改为只用 FN Connect，去掉 VPS/Cloudflare；NAS 端定为 Docker 接收服务；新分区表预留 OTA；上传改为每 60 s 批量发送以省电；指示间隔定为 10 s；更新待输入项 |
 | v0.4 | 2026-11-19 | 胡嘉 | 绿色电源灯为硬件灯、软件不可控，录音指示定为背光；确认无固定公网 IP，FN Connect 走中继，中继验证升为首要阻塞项 |
+| v0.5 | 2026-11-22 | 胡嘉 | 阶段 2 真实断电测试通过并补记结果；阶段 3 接收服务实现并定稿 7.2 线格式（session_id 28 字符、409 重同步、零长探针、fsync 顺序、meta 权威长度）；补记固件缺口（会话需存录音开始时间）和中继头透传待验证项 |
 
 ## 链接
 - 库内：无
@@ -108,18 +109,26 @@ date: 2026-11-19
 
 ### 7.2 协议
 
-- 每个录音一个 `session_id`（设备 ID + 开始时间 + 随机数）。
-- HTTPS PUT 分段上传，带 `session_id`、`offset`（字节偏移）、`seq`，每段 16–32 KB。
+线格式已按实现定稿（`server/server.py`）：
+
+- **session_id 固定 28 字符**：`<dev8>-<ts10>-<rand8>`，如 `98c377f4-1763800000-9f3e2a11`。`dev8` 是 MAC 低 32 位十六进制，`ts10` 是录音开始的 Unix 秒，`rand8` 是缓存里的 32 位会话号。服务端正则闭合校验，路径只由它和它推导的日期拼成，不做字符串清洗。`ts` 超出 `[now-90d, now+1d]` 拒绝。
+- **端点**：`PUT /v1/upload/<session_id>` 分段上传；`GET` 同路径查状态；`GET /healthz` 健康检查。
+- **请求头**（也接受 query 参数兜底，防止中继改写）：`Authorization: Bearer <token>`、`Content-Length`（必需，不支持 chunked）、`X-Offset`、`X-Seq`（仅日志）、`X-Final`、`X-Total-Len`（final 时必需）。
+- **每个响应都带 `received`**，设备只以它为准推进本地读指针；不跟"已发送"走。这样 offset 落后和超前用同一条赋值语句收敛。
 - 省电：录音时每 60 s 开一次连接批量发完缓存数据，其余时间 Wi-Fi 进入省电模式；不做持续长连接。
-- 服务端按 `offset` 追加写；`offset` 已存在则返回 200（幂等）；`offset` 超前则返回已收长度，设备从该处重传。
-- 结束：发送 `final=true` 和总长度，服务端校验后改名为完成文件。
-- 鉴权：一台设备一个 token，存 NVS，不入仓库；CA 校验 FN Connect 证书。
+- **状态机**：首次 `offset=0` → 200；`offset==received` → 200；完全重复且字节一致 → 200 `duplicate`；部分重叠一致 → 200 `overlap` 只追加尾部；重叠内容不一致 → 409 `conflict`；`offset>received` → 409 `gap`；零长 `offset=0` 探针 → 200 `probe` 不建文件。409 是重同步指令，不是错误码 E300。
+- **final**：`received==total` 才改名完成；`received<total` → 400 `incomplete`；`total<received` → 400 `bad_total`。已 finalized 的会话收到任何 PUT 都返回 200 `finalized`（幂等）。
+- **落盘顺序不可改**：写数据 → fsync → 更新 meta 的 `committed` → 才回 200。保证"回给设备的 received 一定已落盘"，掉电最多丢一个 32 KB 段，设备重传即可。重启后以 meta 的 `committed` 为权威，文件更长则截断，更短则降回实际大小。
+- **鉴权**：一机一 token，存服务端 `tokens.json`，不入仓库。token 与 `dev8` 绑定：token 无效 → 401，token 有效但不属于这个设备前缀 → 403。比较用 `hmac.compare_digest`。
+- **TLS**：FN Connect 一般自己终止 TLS，服务端默认明文；本机或直连测试可自带证书。设备侧 CA 校验保护的是设备到 FN Connect 那一段。
 
 ### 7.3 NAS 端接收服务
 
-- Docker 容器，单个小 HTTP 服务（如 Python FastAPI 或 Go），只实现上面的 PUT 和 final 两个接口。
-- 文件落到 NAS 共享目录：`<日期>/<session_id>.ogg`，未完成的带 `.part` 后缀。
-- 每日转写任务只处理已完成的文件。
+- Docker 容器，单个 Python 标准库 HTTP 服务（`server/server.py`，无第三方依赖）。源码和 compose 在仓库 `server/`。
+- 文件落到 `<日期>/<session_id>.ogg`，未完成是兄弟文件 `.ogg.part`，元数据是同目录的 `<session_id>.meta.json`。日期由 session_id 里的 ts 推导，跨零点的会话落在同一目录。
+- 数据目录必须落在 NAS **本地文件系统**（ext4/btrfs）的 bind mount，不要放 SMB/NFS 共享：`fsync` 和 `rename` 的原子性在那里不可靠。
+- 每日转写任务只处理 `*.ogg`，并额外要求兄弟 meta 的 `finalized=true`（防半成品或人工拷入的文件）。
+- 测试：`tools/stage3/e2e_test.py`（44 用例）、`curl_smoke.sh`（8 用例）、`fake_device.py`（无硬件跑完整链路）。
 
 ## 8. 功耗估算（需实测）
 
@@ -151,6 +160,8 @@ date: 2026-11-19
 | 2 | 宽带是否有 IPv6（可能有，但目前无法确认，也没有配置）。暂时绕过，按走中继处理，不影响阶段 2–3 的设计 | 胡嘉 |
 | 3 | 7.1 的三项验证：在 NAS 上起一个测试容器，用手机热点（模拟外网）`curl -X PUT` 测 | 一起做 |
 | 4 | 第 7.1 第 3 项不通过时的退路：DDNS + 证书（需要公网 IP），或自有 VPS | 验证后再定 |
+| 5 | **固件缺口（阶段 4 前置）**：阶段 2 缓存只存 32 位会话号，没有录音开始时间，而 session_id 需要 `ts10`。需在 `audio_cache_begin_session` 时把 `{session32, start_ts, acked}` 写 NVS。`start_ts` 取 SNTP 时间，未同步则报 E203 先同步再开录 | 胡嘉 |
+| 6 | FN Connect 中继是否原样透传 `Authorization` 和 `X-*` 头。服务端头和 query 两种形式都接受，接入真机前先用真实请求确认 | 验证 7.1 时一并做 |
 
 ## 11. 里程碑
 
@@ -172,7 +183,8 @@ date: 2026-11-19
 |---|---|---|
 | 0 | 完成（2026-11-20） | 官方主分支 demo 编译烧录到 COM3，屏幕亮、右侧三键有响应。应用镜像 0x174600 字节（约 1.45 MB），合并镜像 0x184600 字节，factory 分区剩余约 82%。 |
 | 1 | 完成（2026-11-20） | 测试工程 `esp-work\stage1-opus`（复制自官方仓库，未改动官方仓库）。Opus 源码为 xiph/opus v1.5.2（源码包 SHA-256 `65c1d2f7…7ce1`，未与官方页面核对），定点编译。录音 30 s，16 kHz 单声道，Ogg Opus 12 kbps，OGG 44264 字节，写入 voice 分区（0x200000）。ffmpeg 解码无报错，时长 30.00 s，音量统计 mean -40.8 dB、max -0.1 dB。复杂度 5 时编码平均 19.6 ms、最大 22.4 ms，不可用；复杂度 2 时平均 11.3 ms、最大 12.9 ms（约 57% CPU）。最小剩余堆约 240 KB，最大连续块约 112 KB。录音任务每帧 `vTaskDelay(1)` 让出 CPU，避免看门狗触发。**Wi-Fi 复测（2026-11-20，已连接 2.4 GHz AP，省电 MIN_MODEM，录音中）**：连接后最小剩余堆约 210 KB；录音 30 s 期间最小剩余堆约 136 KB，最大连续块仍为 112 KB；复杂度 2 时编码平均 11.8 ms、最大 15.3 ms（约 59% CPU），仍可用。**未完成**：TLS 握手内存尚未实测（需要 NAS 端点，阶段 3 再测）；听感评价待人工确认。注意 ESP32-C3 不支持 5 GHz，`_5G` 的 SSID 连不上。 |
-| 2 | 完成（2026-11-20，待听感确认） | 缓存分区 0x460000 起，0x3A0000 字节，928 个 4 KB 扇区。录音按扇区落盘，每扇区带头部（magic、序号、会话号、长度）和 CRC32；开机扫描恢复写指针，只校验最后一扇区。两次硬复位模拟掉电：每次都开新会话，挂载后写指针正确（`cache mounted sectors=94`）。读出缓存按会话拆分后得到 4 个 Ogg 流，CRC 全部通过，页序号连续，granule 单调，尾部截断符合掉电预期。缓存满时报 E500 并停止录音（仅写串口日志，屏幕不提示，已记为待办）。测试期间缓存曾被写满导致屏幕停在 "STAGE2 boot"，擦除缓存后恢复。**未完成**：真实断电测试（目前是 RTS 复位，不是断电）；解码播放未在本机验证，成品在 `esp-work\stage2-tools\listen\` 供直接用浏览器或 VLC 播放。 |
-| 3–8 | 未开始 | |
+| 2 | 完成（2026-11-22，待听感确认） | 缓存分区 0x460000 起，0x3A0000 字节，928 个 4 KB 扇区。录音按扇区落盘，每扇区带头部（magic、序号、会话号、长度）和 CRC32；开机扫描恢复写指针，只校验最后一扇区。**真实断电测试（2026-11-22，macOS）**：擦除缓存后录制约 120 s 拔掉 USB。断电前最后状态 `cache mounted sectors=3` 起新会话 `5891708b`；重新上电后 `cache mounted sectors=59 payload=240484 last_session=5891708b`，写指针正确恢复，会话号一致。读回缓存 72 个有效扇区，拆出 3 个会话（`4f4d2385` 12 KB、`5891708b` 228 KB、`904aae77` 53 KB），全部 `crc_bad=0`、`seq_gaps=0`、`gran_monotonic=True`，`truncated_tail=True` 符合断电预期。`5891708b` 断电前已落盘 59 个满扇区（240484 字节），读回 228256 字节，差值来自断电瞬间 RAM 缓冲里未满扇区的内容，符合"只保证已落盘扇区"的设计。另验证 E500：缓存写满时 `E500 cache full at frame 4355` 停止录音，已录部分保留（928/928 扇区）。**未完成**：听感评价待人工确认；屏幕不显示 E500（推迟到阶段 6 UI）。测试音频在 `~/Projects/passport-flash-backup/`，不入库。串口有个坑：pyserial 默认打开端口会拉 DTR/RTS 把 C3 顶进下载模式，`serial_watch.py` 已改为显式 `dtr=False rts=False`。 |
+| 3 | 接收服务完成，外网验证待做（2026-11-22） | 服务端 `server/server.py`（只用 Python 标准库，约 600 行）已实现并按设计文档 7.2 扩展了协议细节。`tools/stage3/e2e_test.py` 44 条用例全过，`curl_smoke.sh` 8/8 过。`tools/stage3/fake_device.py` 用缓存 dump 或合成 Ogg 模拟设备跑完整链路，断网续传、冲突重同步、死循环保护均已验证。**未完成**：部署到 NAS；经 FN Connect 中继的 HTTPS 外网验证（设计文档 7.1 三项阻塞项仍待实测）。 |
+| 4–8 | 未开始 | |
 
 阻塞项：企业文件标记工具会给新写入的 PNG 注入 tEXt 标签，导致 lvgl 组件的 CHECKSUM 校验失败。当前用 `esp-work\scripts\install_lvgl_verified.py` 绕过，待 IT 决定是否排除 esp-work 目录。
