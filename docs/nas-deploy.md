@@ -21,6 +21,9 @@ date: 2026-11-22
 
 ---
 
+> **换网络继续做**：企业网因 AP 客户端隔离无法联调，交接步骤见
+> [docs/network-handoff.md](network-handoff.md)。
+
 ## 1. 本机验证（不依赖 NAS）
 
 先把服务和协议在本机跑通，再去 NAS 上碰外网。
