@@ -345,15 +345,21 @@ void app_prov_start(void) {
         return;
     }
 
+    // HTTP server 起不来时不在这里 return：那样 s_active 永远是假，主循环每秒都会
+    // 重新调 app_prov_start，反复建 netif、反复打错误日志。这里把状态机置为 active，
+    // 热点照开（用户还能看到屏幕上的热点名），错误已经写在串口里。
     s_server = start_server();
     if (!s_server) {
-        // 热点照开，页面没了也要能恢复：报错后由 tick 重试。
-        return;
+        app_log(TAG, "ap up but http server failed, page unavailable");
     }
 
     s_active = true;
     s_clients = 0;
-    app_log(TAG, "ap ready ssid=%s ip=192.168.4.1", s_ap_name);
+    // 重新进配网（用户想改 Wi-Fi）时必须清掉：否则 tick 看到"已配好且没手机连着"
+    // 会立刻把热点关掉，用户根本来不及填表。
+    s_got_cfg = false;
+    s_cfg_at_us = 0;
+    app_log(TAG, "ap ready ssid=%s ip=192.168.4.1 server=%d", s_ap_name, s_server != NULL);
 }
 
 void app_prov_stop(void) {
