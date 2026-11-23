@@ -92,17 +92,31 @@ static void nvs_set_done(uint32_t session) {
     nvs_close(h);
 }
 
-static void nvs_put_start_ts(uint32_t session, uint32_t ts) {
+static esp_err_t nvs_put_start_ts(uint32_t session, uint32_t ts) {
     nvs_handle_t h;
     if (nvs_open(NVS_NS, NVS_READWRITE, &h) != ESP_OK) {
         app_error_report(APP_E501_FLASH, APP_SRC_RECORD, "nvs_open for start_ts failed");
-        return;
+        return ESP_FAIL;
     }
     char key[16];
     ts_key(key, sizeof key, "ts", session);
-    nvs_set_u32(h, key, ts);
-    nvs_commit(h);
+    esp_err_t err = nvs_set_u32(h, key, ts);
+    ts_key(key, sizeof key, "bm", session);
+    if (err == ESP_OK) err = nvs_set_u32(h, key, 0); // start marker, with reason=interrupted
+    if (err == ESP_OK) err = nvs_commit(h);
     nvs_close(h);
+    return err;
+}
+
+static bool nvs_ble_info(uint32_t session, uint32_t *packed, bool save) {
+    nvs_handle_t h;
+    if (nvs_open(NVS_NS, save ? NVS_READWRITE : NVS_READONLY, &h) != ESP_OK) return false;
+    char key[16];
+    ts_key(key, sizeof key, "bm", session);
+    esp_err_t rc = save ? nvs_set_u32(h, key, *packed) : nvs_get_u32(h, key, packed);
+    if (rc == ESP_OK && save) rc = nvs_commit(h);
+    nvs_close(h);
+    return rc == ESP_OK;
 }
 
 static uint32_t nvs_get_start_ts(uint32_t session) {
@@ -223,8 +237,7 @@ int app_store_begin(uint32_t session, uint32_t start_ts) {
         app_error_report(APP_E501_FLASH, APP_SRC_RECORD, "begin_session r=%d", r);
         return r;
     }
-    nvs_put_start_ts(session, start_ts);
-    return 0;
+    return nvs_put_start_ts(session, start_ts) == ESP_OK ? 0 : -1;
 }
 
 int app_store_append(const void *data, size_t n) {
@@ -239,7 +252,7 @@ int app_store_append(const void *data, size_t n) {
     return r;
 }
 
-void app_store_end(void) {
+void app_store_end(uint8_t reason, uint32_t duration_ms) {
     if (!s_mounted) return;
     if (!store_lock_take(APP_SRC_RECORD)) return;
     int r = audio_cache_flush(&s_cache);
@@ -248,8 +261,11 @@ void app_store_end(void) {
     if (r < 0) {
         app_error_report(APP_E501_FLASH, APP_SRC_RECORD, "final flush r=%d", r);
     }
-    // 短扇区落盘之后才标封闭：标记一旦写入，上传侧就会对当前长度发 final。
-    if (sess) nvs_set_sealed(sess, true);
+    // 先持久化结束原因，再封闭音频前缀；失败不能宣称正常结束。
+    if (sess) {
+        uint32_t packed = (duration_ms << 2) | (r < 0 ? 3u : (reason & 3u));
+        if (nvs_ble_info(sess, &packed, true)) nvs_set_sealed(sess, true);
+    }
 }
 
 void app_store_seal(void) {
@@ -304,7 +320,11 @@ int app_store_list(app_session_t *out, int max) {
         if (nvs_get_done(out[i].session)) continue;      // 已上传完，跳过
         out[i].start_ts = nvs_get_start_ts(out[i].session);
         out[i].sealed = nvs_get_sealed(out[i].session);
-        if (out[i].start_ts == 0) {
+        uint32_t packed = 0;
+        out[i].ble_eligible = nvs_ble_info(out[i].session, &packed, false);
+        out[i].end_reason = packed & 3u;
+        out[i].duration_ms = packed >> 2;
+        if (out[i].start_ts == 0 && !out[i].ble_eligible) {
             // 没有开始时间就拼不出 session_id，传不上去。数据保留不删，等人工处理。
             app_error_report(APP_E203_NO_TIME, APP_SRC_UPLOAD,
                              "session=%08x has no start_ts, kept but not uploaded",

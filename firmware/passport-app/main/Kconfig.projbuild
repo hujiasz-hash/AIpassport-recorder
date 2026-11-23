@@ -1,0 +1,7 @@
+menu "AI Passport"
+config PASSPORT_WIFI_LEGACY
+    bool "Use legacy Wi-Fi/NAS upload instead of BLE"
+    default n
+    help
+        Alternate build profile for the legacy NAS receiver. No simultaneous transfers.
+endmenu

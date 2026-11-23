@@ -17,9 +17,9 @@ date: 2026-11-22
 
 ## 链接
 - 库内：[docs/design.md](design.md) — 第 7 节协议与链路、第 9 节错误码
-- 库内：[docs/firmware-setup.md](firmware-setup.md) — 固件构建、缓存分区操作
-- 库内：[server/server.py](../server/server.py) — 接收服务实现
-- 库内：[tools/stage3/e2e_test.py](../tools/stage3/e2e_test.py) — 端到端测试
+- 库内：[docs/firmware-setup.md](../firmware-setup.md) — 固件构建、缓存分区操作
+- 库内：[server/server.py](../../server/server.py) — 接收服务实现
+- 库内：[tools/stage3/e2e_test.py](../../tools/stage3/e2e_test.py) — 端到端测试
 - 外部：[fnOS 远程访问方式](https://help.fnnas.com/articles/v1/access/how-access) — FN Connect 直连/中继说明
 
 ---

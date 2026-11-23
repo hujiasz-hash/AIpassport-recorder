@@ -1,0 +1,107 @@
+
+=== port opened ===
+I (206) esp_image: segment 4: paddr=0012d6f0 vaddr=4038aa14 sizeESP-ROM:esp32c3-eco7-20230720
+Build:Jul 20 2023
+rst:0x15 (USB_UART_CHIP_RESET),boot:0xa (SPI_FAST_FLASH_BOOT)
+Saved PC:0x40389ccc
+SPIWP:0xee
+mode:DIO, clock div:1
+load:0x3fcd5830,len:0x1584
+load:0x403cbf10,len:0xc44
+load:0x403ce710,len:0x2ff8
+entry 0x403cbf1a
+I (24) boot: ESP-IDF v5.5.3 2nd stage bootloader
+I (24) boot: compile time Nov 22 2026 18:01:38
+I (24) boot: chip revision: v1.1
+I (25) boot: efuse block revision: v1.3
+I (25) boot.esp32c3: SPI Speed      : 80MHz
+I (25) boot.esp32c3: SPI Mode       : DIO
+I (25) boot.esp32c3: SPI Flash Size : 8MB
+I (25) boot: Enabling RNG early entropy source...
+I (25) boot: Partition Table:
+I (25) boot: ## Label            Usage          Type ST Offset   Length
+I (26) boot:  0 nvs              WiFi data        01 02 00009000 00006000
+I (26) boot:  1 otadata          OTA data         01 00 0000f000 00002000
+I (26) boot:  2 phy_init         RF data          01 01 00011000 00001000
+I (26) boot:  3 ota_0            OTA app          00 10 00020000 00200000
+I (27) boot:  4 ota_1            OTA app          00 11 00220000 00200000
+I (27) boot:  5 log              Unknown data     01 41 00420000 00040000
+I (27) boot:  6 cache            Unknown data     01 40 00460000 003a0000
+I (28) boot: End of partition table
+I (28) esp_image: segment 0: paddr=00020020 vaddr=3c0d0020 size=32cd8h (208088) map
+I (61) esp_image: segment 1: paddr=00052d00 vaddr=3fc95400 size=028fch ( 10492) load
+I (63) esp_image: segment 2: paddr=00055604 vaddr=40380000 size=0aa14h ( 43540) load
+I (72) esp_image: segment 3: paddr=00060020 vaddr=42000020 size=cd6c8h (841416) map
+I (206) esp_image: segment 4: paddr=0012d6f0 vaddr=4038aa14 size=0a824h ( 43044) load
+I (214) esp_image: segment 5: paddr=00137f1c vaddr=50000000 size=00020h (    32) load
+I (221) boot: Loaded app from partition at offset 0x20000
+I (221) boot: Disabling RNG early entropy source...
+I (221) cpu_start: Unicore app
+I (230) cpu_start: Pro cpu start user code
+I (230) cpu_start: cpu freq: 160000000 Hz
+I (230) app_init: Application information:
+I (230) app_init: Project name:     passport-app
+I (231) app_init: App version:      1
+I (231) app_init: Compile time:     Nov 23 2026 10:28:40
+I (231) app_init: ELF file SHA256:  7f3c33220...
+I (231) app_init: ESP-IDF:          v5.5.3
+I (231) efuse_init: Min chip rev:     v0.3
+I (231) efuse_init: Max chip rev:     v1.99 
+I (231) efuse_init: Chip rev:         v1.1
+I (231) heap_init: Initializing. RAM available for dynamic allocation:
+I (231) heap_init: At 3FC9AEA0 len 00025160 (148 KiB): RAM
+I (232) heap_init: At 3FCC0000 len 0001C710 (113 KiB): Retention RAM
+I (232) heap_init: At 3FCDC710 len 0000294C (10 KiB): Retention RAM
+I (232) heap_init: At 50000020 len 00001FC8 (7 KiB): RTCRAM
+I (233) spi_flash: detected chip: generic
+I (233) spi_flash: flash io: dio
+I (234) sleep_gpio: Configure to isolate all GPIO pins in sleep state
+I (234) sleep_gpio: Enable automatic switching of GPIO sleep configuration
+I (235) main_task: Started on CPU0
+I (235) main_task: Calling app_main()
+I (235) main: boot firmware=Nov 23 2026 10:30:14
+I (242) config: dev=77f452f8 ssid=set(5) url=set(24) token=set nvs=1
+I (373) bsp_disp: 背光 LEDC 就绪 gpio=21
+I (373) bsp_disp: 显示就绪 240x320
+I (374) LVGL: Starting LVGL task
+I (412) bsp_lvgl: LVGL 就绪，全局圆角=30，外部填充=黑色
+I (625) ui: ui ready 240x320
+I (636) store: mounted sectors=108/928 payload=435057 last_session=8a6c087c full=0 pending=435057
+I (637) bsp_i2c: I2C 就绪 SDA=GPIO10 SCL=GPIO7
+I (645) ES8311: Work in Slave mode
+I (648) bsp_audio: ES8311 就绪
+I (648) I2S_IF: Paired data: 0x3fcb2824, current mode: playback, paired in_enable: 0, paired out_enable: 0
+I (649) I2S_IF: STD: TX, data_bit: 16, slot_bit: 16, ws_width: 16, slot_mode: MONO, slot_mask: 0x1
+I (650) I2S_IF: STD: TX, sample_rate_hz: 16000, mclk_multiple: 256, clk_src: 6
+I (650) I2S_IF: Current mode(record) and peer mode have same sample_rate 16000, channel 2, bits_per_sample 16
+I (651) I2S_IF: STD: RX, data_bit: 16, slot_bit: 16, ws_width: 16, slot_mode: MONO, slot_mask: 0x1
+I (651) I2S_IF: STD: RX, sample_rate_hz: 16000, mclk_multiple: 256, clk_src: 6
+I (667) Adev_Codec: Open codec device OK
+I (668) bsp_audio: codec 打开 16000Hz/16bit/1ch
+I (668) record: audio ready 16000 Hz mono
+I (669) BLE_INIT: BT controller compile version [1bb2f50]
+I (669) BLE_INIT: Using main XTAL as clock source
+I (669) BLE_INIT: Feature Config, ADV:1, BLE_50:1, DTM:1, SCAN:1, CCA:0, SMP:1, CONNECT:1
+I (670) BLE_INIT: Bluetooth MAC: 98:c3:77:f4:52:fa
+I (672) phy_init: phy_version 1232,d493f299,Aug 25 2025,19:01:20
+I (732) NimBLE: GAP procedure initiated: stop advertising.
+
+I (733) passport_ble: BLE host synced
+I (733) button: IoT Button Version: 4.2.0
+I (734) bsp_btn: 按键就绪:ADC1_CH0 三键分压,短按 180ms 长按 500ms
+I (735) bsp_batt: 检测到 CW2017 VERSION=0x0F
+I (772) bsp_batt: 万锂新能源 500mAh profile2 XIL40X 20261020 已匹配
+I (873) bsp_batt: CW2017 ready: SOC=98%, voltage=4158 mV
+I (874) main: boot done dev=77f452f8 ready=1 token=1
+I (1177) NimBLE: GAP procedure initiated: advertise; 
+I (1178) NimBLE: disc_mode=2
+I (1178) NimBLE:  adv_channel_map=0 own_addr_type=0 adv_filter_policy=0 adv_itvl_min=32 adv_itvl_max=32
+I (1178) NimBLE: 
+
+I (1179) passport_ble: advertising AI Passport at 20 ms (service UUID in primary packet)
+I (31330) NimBLE: GAP procedure initiated: advertise; 
+I (31331) NimBLE: disc_mode=2
+I (31331) NimBLE:  adv_channel_map=0 own_addr_type=0 adv_filter_policy=0 adv_itvl_min=244 adv_itvl_max=244
+I (31331) NimBLE: 
+
+I (31332) passport_ble: advertising AI Passport at 152.5 ms (service UUID in primary packet)

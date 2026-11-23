@@ -14,6 +14,9 @@ typedef struct {
     uint32_t bytes;         // 已落盘字节数（不含扇区头）
     uint32_t start_ts;      // 录音开始的 Unix 秒；重启后从 NVS 恢复
     bool sealed;            // 已封闭（不再增长），上传侧才允许发 final
+    bool ble_eligible;      // 只自动传新固件创建的会话，不迁移旧缓存
+    uint8_t end_reason;     // 0: interrupted, 1: normal, 2: cache_full, 3: record_error
+    uint32_t duration_ms;
 } app_session_t;
 
 // 挂载缓存分区、恢复写指针。失败会报 E501。
@@ -31,7 +34,7 @@ int app_store_begin(uint32_t session, uint32_t start_ts);
 int app_store_append(const void *data, size_t n);
 
 // 录音结束：把 RAM 缓冲区里的短扇区落盘，会话转为"已封闭"，允许上传侧 final。
-void app_store_end(void);
+void app_store_end(uint8_t reason, uint32_t duration_ms);
 
 // 开机时调用：把上一轮（掉电中断的）会话封闭，否则它永远不会被 final，
 // 文件在 NAS 上一直停在 .ogg.part。

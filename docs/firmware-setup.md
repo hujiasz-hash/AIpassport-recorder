@@ -139,7 +139,7 @@ python tools/stage2/power_loss_test.py /dev/cu.usbmodem* ./pl verify
 
 ## 10. NAS 接收服务
 
-见 [nas-deploy.md](nas-deploy.md)。本机验证不需要 NAS：
+旧版 NAS 部署见[归档说明](archive/nas-deploy.md)。本机验证不需要 NAS：
 
 ```sh
 python3 tools/stage3/e2e_test.py                              # 44 条用例

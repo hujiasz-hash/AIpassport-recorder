@@ -115,7 +115,7 @@ static void record_task(void *arg) {
     if (r < 0) {
         app_error_report(r == -100 ? APP_E500_CACHE_FULL : APP_E501_FLASH, APP_SRC_RECORD,
                          "write ogg headers r=%d", r);
-        app_store_end();
+        app_store_end(3, 0);
         opus_encoder_destroy(s_enc);
         s_enc = NULL;
         s_active = false;
@@ -133,7 +133,7 @@ static void record_task(void *arg) {
     int16_t pcm[OGG_FRAME_SAMPLES];
     uint8_t pkt[OGG_MAX_PKT_BYTES];
     int64_t last_status = esp_timer_get_time();
-    bool failed = false;
+    uint8_t end_reason = 1; // normal, unless recording or final write fails
 
     for (uint32_t f = 0; f < MAX_FRAMES; f++) {
         if (s_stop_req) break;
@@ -142,14 +142,14 @@ static void record_task(void *arg) {
         if (aerr != ESP_OK) {
             app_error_report(APP_E400_INIT, APP_SRC_RECORD, "audio read frame %u: %s",
                              (unsigned)f, esp_err_to_name(aerr));
-            failed = true;
+            end_reason = 3;
             break;
         }
         int n = opus_encode(s_enc, pcm, OGG_FRAME_SAMPLES, pkt, sizeof pkt);
         if (n < 0) {
             app_error_report(APP_E401_ENCODER, APP_SRC_RECORD, "opus_encode err=%d at frame %u",
                              n, (unsigned)f);
-            failed = true;
+            end_reason = 3;
             break;
         }
         s_frames++;
@@ -161,12 +161,13 @@ static void record_task(void *arg) {
         if (r == AUDIO_CACHE_ERR_FULL) {
             app_error_report(APP_E500_CACHE_FULL, APP_SRC_RECORD, "cache full at frame %u",
                              (unsigned)f);
+            end_reason = 2;
             break;
         }
         if (r < 0) {
             app_error_report(APP_E501_FLASH, APP_SRC_RECORD, "cache write r=%d frame %u",
                              r, (unsigned)f);
-            failed = true;
+            end_reason = 3;
             break;
         }
 
@@ -180,8 +181,9 @@ static void record_task(void *arg) {
     }
 
     // 落尾页。缓存满时尾页也可能写不进去，忽略错误——已落盘的数据仍然可播。
-    ogg_finish(s_writer, !failed, store_sink, NULL);
-    app_store_end();
+    int tail = ogg_finish(s_writer, end_reason == 1, store_sink, NULL);
+    if (tail < 0) end_reason = (tail == AUDIO_CACHE_ERR_FULL) ? 2 : 3;
+    app_store_end(end_reason, (uint32_t)((esp_timer_get_time() - s_start_us) / 1000));
 
     char end_iso[24];
     app_net_now_iso(end_iso, sizeof end_iso);
@@ -211,10 +213,6 @@ esp_err_t app_record_start(void) {
         app_error_report(APP_E600_LOW_BATTERY, APP_SRC_RECORD, "soc=%d < %d", soc,
                          MIN_SOC_TO_RECORD);
         why = "E600";
-    }
-    if (!why && !app_net_time_valid()) {
-        app_error_report(APP_E203_NO_TIME, APP_SRC_RECORD, "refused, no start time");
-        why = "E203";
     }
     if (why) return ESP_ERR_INVALID_STATE;
 

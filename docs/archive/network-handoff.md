@@ -18,7 +18,7 @@ date: 2026-11-22
 ## 链接
 - 库内：[docs/nas-deploy.md](nas-deploy.md) — 接收服务部署与排错
 - 库内：[docs/design.md](design.md) — 协议（第 7 节）、错误码（第 9 节）
-- 库内：[server/docker-compose.yml](../server/docker-compose.yml) — 群晖上要跑的就是它
+- 库内：[server/docker-compose.yml](../../server/docker-compose.yml) — 群晖上要跑的就是它
 
 ---
 

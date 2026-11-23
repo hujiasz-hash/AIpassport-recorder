@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "app_ble.h"
 #include "app_config.h"
 #include "app_error.h"
 #include "app_net.h"
@@ -33,6 +34,8 @@ static volatile bool s_prov_wanted;
 static volatile bool s_req_toggle_record;
 static volatile bool s_req_back_home;
 static volatile bool s_req_enter_prov;
+static volatile bool s_req_pair;
+static volatile bool s_req_adv;
 static volatile bool s_req_leave_prov;
 static uint32_t s_seen_err_seq;   // 已经弹过屏的错误序号
 
@@ -47,8 +50,10 @@ static void record_state_cb(bool active, void *user) {
         app_ui_set_page(APP_PAGE_HOME);
         app_log(TAG, "record stopped session=%s bytes=%u",
                 app_record_session_hex(), (unsigned)app_record_bytes());
+#ifdef CONFIG_PASSPORT_WIFI_LEGACY
         // 停止后立刻尝试上传，别等 60 秒周期。
         app_upload_kick();
+#endif
     }
 }
 
@@ -59,14 +64,19 @@ static void on_key(bsp_btn_t btn, bsp_btn_ev_t ev, void *user) {
         app_ui_note_input();
         return;
     }
+    if (btn == BSP_BTN_UP && ev == BSP_BTN_LONG) s_req_adv = true;
     if (btn != BSP_BTN_OK) return;
 
     if (ev == BSP_BTN_LONG) {
+#ifdef CONFIG_PASSPORT_WIFI_LEGACY
         if (app_ui_page() == APP_PAGE_PROV) {
             s_req_leave_prov = true;
         } else {
             s_req_enter_prov = true;
         }
+#else
+        s_req_pair = true;
+#endif
         return;
     }
     if (ev != BSP_BTN_CLICK) return;
@@ -80,6 +90,15 @@ static void on_key(bsp_btn_t btn, bsp_btn_ev_t ev, void *user) {
 
 // 处理按键请求。阻塞操作（停录音、开热点）只在这里做。
 static void handle_requests(void) {
+    if (s_req_pair) {
+        s_req_pair = false;
+        app_ble_allow_pairing();
+    }
+    if (s_req_adv) {
+        s_req_adv = false;
+        app_ble_advertise_for(0);
+        app_log(TAG, "advertising retry forced");
+    }
     if (s_req_back_home) {
         s_req_back_home = false;
         app_ui_set_page(APP_PAGE_HOME);
@@ -113,6 +132,7 @@ static void handle_requests(void) {
 }
 
 // 由主循环驱动配网启停，避免在按键回调里做重活（开热点、起 HTTP 任务都不轻）。
+#ifdef CONFIG_PASSPORT_WIFI_LEGACY
 static void prov_tick(void) {
     if (s_prov_wanted && !app_prov_active()) {
         app_ui_set_page(APP_PAGE_PROV);
@@ -132,6 +152,8 @@ static void prov_tick(void) {
         app_log(TAG, "prov done, back to home");
     }
 }
+
+#endif
 
 // 任何模块报了新错误（未被去重吞掉）就弹错误页，用户能看到屏幕上那句短话。
 // 录音中不抢屏：录音页要一直显示计时；错误仍完整写在串口。
@@ -177,18 +199,16 @@ void app_main(void) {
     app_store_init();
     app_store_seal();     // 掉电中断的会话标封闭，之后才能被 final
 
-    app_net_init();
-    if (app_config_ready()) {
-        app_net_apply_credentials();
-    } else {
-        // 没配网：直接进配网模式。这个产品第一次上手就这一条路。
-        app_log(TAG, "not provisioned, entering prov");
-        s_prov_wanted = true;
-    }
-
     app_record_init();
     app_record_set_callback(record_state_cb, NULL);
+#ifdef CONFIG_PASSPORT_WIFI_LEGACY
+    app_net_init();
+    if (app_config_ready()) app_net_apply_credentials();
+    else s_prov_wanted = true;
     app_upload_init();
+#else
+    app_ble_init();
+#endif
 
     esp_err_t err = bsp_button_init(on_key, NULL);
     if (err != ESP_OK) {
@@ -200,11 +220,14 @@ void app_main(void) {
     app_log(TAG, "boot done dev=%s ready=%d token=%d", app_config_dev(),
             (int)app_config_ready(), (int)app_config_has_token());
 
+#ifdef CONFIG_PASSPORT_WIFI_LEGACY
     bool net_started = app_config_ready();
     int64_t last_upload_kick = 0;
+#endif
 
     for (;;) {
         handle_requests();
+#ifdef CONFIG_PASSPORT_WIFI_LEGACY
         prov_tick();
 
         // 配网刚写完配置：由 app_prov 调 apply_credentials，这里只补一次保险。
@@ -219,7 +242,20 @@ void app_main(void) {
             app_upload_kick();
             last_upload_kick = esp_timer_get_time();
         }
-
+#else
+        app_ble_reclaim_if_idle();
+        static uint32_t last_key = UINT32_MAX;
+        static bool last_ready = false;
+        uint32_t key = app_ble_passkey();
+        bool connected = app_ble_ready();
+        if (key != UINT32_MAX && key != last_key) {
+            app_ui_set_page(APP_PAGE_HOME);
+            app_ui_note_input();
+            app_log(TAG, "showing pairing code on home page");
+        } else if (connected && !last_ready) app_ui_note_input();
+        last_key = key;
+        last_ready = connected;
+#endif
         error_tick();
         ui_tick();
         vTaskDelay(pdMS_TO_TICKS(TICK_MS));

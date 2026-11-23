@@ -4,6 +4,7 @@
 #include <string.h>
 #include <time.h>
 
+#include "app_ble.h"
 #include "app_config.h"
 #include "app_error.h"
 #include "app_net.h"
@@ -28,8 +29,8 @@ extern const lv_font_t lv_font_ui_20;
 // 错误页 10 秒后自动回主页。
 #define ERROR_AUTO_BACK_MS 10000
 
-// 无操作 10 秒熄屏；有按键立刻点亮。
-#define SCREEN_OFF_US (10LL * 1000 * 1000)
+// 保留配对码输入时间；上/下按键仍可主动唤醒。
+#define SCREEN_OFF_US (30LL * 1000 * 1000)
 #define BACKLIGHT_ON 85
 
 // 中文字形用自带的 14 号子集字体（lv_font_ui_14.c，由 Hiragino Sans GB 生成）。
@@ -203,7 +204,7 @@ static void set_label(lv_obj_t *label, const char *text) {
 
 void app_ui_refresh_home(void) {
     if (!s_ui_ok) return;
-    char time_s[8] = "--:--";
+    char time_s[12] = "--:--";
     char date_s[32] = "时间未同步";
     time_t now = app_net_now();
     if (now) {
@@ -235,6 +236,7 @@ void app_ui_refresh_home(void) {
 
     // 提示行优先显示最需要处理的一件事。
     char hint[48];
+#ifdef CONFIG_PASSPORT_WIFI_LEGACY
     if (!app_config_ready()) {
         snprintf(hint, sizeof hint, "长按 OK 进入配网");
     } else if (app_store_full()) {
@@ -244,6 +246,19 @@ void app_ui_refresh_home(void) {
     } else {
         snprintf(hint, sizeof hint, "OK 开始录音");
     }
+#else
+    uint32_t key = app_ble_passkey();
+    if (key != UINT32_MAX) {
+        // Pairing is the current primary task: make the code impossible to miss.
+        snprintf(time_s, sizeof time_s, "%06u", (unsigned)key);
+        snprintf(date_s, sizeof date_s, "配对码");
+        snprintf(batt, sizeof batt, "请在 Mac 输入");
+        pend[0] = '\0';
+        snprintf(hint, sizeof hint, "120 秒内完成配对");
+    }
+    else if (app_store_full()) snprintf(hint, sizeof hint, "缓存已满 等上传");
+    else snprintf(hint, sizeof hint, "%s", app_ble_ready() ? "蓝牙已连接 OK 开始" : "蓝牙未连接 OK 开始");
+#endif
 
     if (!bsp_lvgl_lock(200)) return;
     set_label(s_home_time, time_s);
@@ -256,9 +271,15 @@ void app_ui_refresh_home(void) {
 
 void app_ui_refresh_record(uint32_t elapsed_sec, uint32_t bytes) {
     if (!s_ui_ok) return;
-    char t[16], b[24];
+    char t[16], b[48];
     snprintf(t, sizeof t, "%02u:%02u", (unsigned)(elapsed_sec / 60), (unsigned)(elapsed_sec % 60));
+#ifdef CONFIG_PASSPORT_WIFI_LEGACY
     snprintf(b, sizeof b, "%u KB", (unsigned)(bytes / 1024));
+#else
+    uint32_t key = app_ble_passkey();
+    if (key != UINT32_MAX) snprintf(b, sizeof b, "配对码 %06u", (unsigned)key);
+    else snprintf(b, sizeof b, "%u KB %s", (unsigned)(bytes / 1024), app_ble_ready() ? "蓝牙已连接" : "蓝牙未连接");
+#endif
     if (!bsp_lvgl_lock(200)) return;
     set_label(s_rec_elapsed, t);
     set_label(s_rec_bytes, b);

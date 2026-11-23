@@ -1,5 +1,6 @@
 idf_component_register(
     SRCS "main.c"
+         "app_ble.c"
          "app_error.c"
          "app_config.c"
          "app_net.c"
@@ -17,6 +18,7 @@ idf_component_register(
     INCLUDE_DIRS "."
     REQUIRES
         bsp
+        bt
         opus
         esp_timer
         esp_partition

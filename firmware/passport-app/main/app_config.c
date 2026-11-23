@@ -93,13 +93,7 @@ void app_config_init(void) {
     memset(&s_cfg, 0, sizeof s_cfg);
 
     esp_err_t err = nvs_flash_init();
-    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        // 分区被写坏或版本不兼容，擦掉重建。配置全部丢失，日志里明确记录。
-        app_error_report(APP_E501_FLASH, APP_SRC_CONFIG, "nvs init %s, erase and retry",
-                         esp_err_to_name(err));
-        nvs_flash_erase();
-        err = nvs_flash_init();
-    }
+    // NVS 也存录音状态和绑定密钥；异常时保留原分区供恢复，不自动擦除。
     if (err != ESP_OK) {
         app_error_report(APP_E501_FLASH, APP_SRC_CONFIG, "nvs_flash_init failed: %s",
                          esp_err_to_name(err));
