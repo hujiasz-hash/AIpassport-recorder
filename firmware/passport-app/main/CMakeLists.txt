@@ -36,5 +36,5 @@ idf_component_register(
 
 set_source_files_properties(octobara_frames.S PROPERTIES
     COMPILE_OPTIONS "-Wa,-I${CMAKE_CURRENT_LIST_DIR}"
-    OBJECT_DEPENDS "${CMAKE_CURRENT_LIST_DIR}/octobara.rgb565"
+    OBJECT_DEPENDS "${CMAKE_CURRENT_LIST_DIR}/octobara.rgb565;${CMAKE_CURRENT_LIST_DIR}/octobara_rec.rgb565"
 )

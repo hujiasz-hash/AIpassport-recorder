@@ -24,6 +24,9 @@ uint32_t app_record_elapsed_sec(void);
 // 本次录音已写入的字节数。
 uint32_t app_record_bytes(void);
 
+// 最近一帧麦克风音量（0..100），未在录时返回 0。
+uint8_t app_record_level(void);
+
 // 当前会话号的 8 位十六进制串，供 UI/日志。未在录时返回上一次的。
 const char *app_record_session_hex(void);
 

@@ -32,6 +32,9 @@ CONFIG_LV_DEF_REFR_PERIOD=20
 CONFIG_LV_FONT_MONTSERRAT_14=y
 CONFIG_LV_FONT_MONTSERRAT_20=y
 CONFIG_LV_FONT_MONTSERRAT_48=y
+# 自带中文字库 lv_font_ui_14.c / lv_font_ui_20.c 为 RLE 压缩格式（bitmap_format = 1），
+# 必须开启 LV_USE_FONT_COMPRESSED，否则 lv_font_get_bitmap_fmt_txt 直接返回 NULL 导致文字空白。
+CONFIG_LV_USE_FONT_COMPRESSED=y
 # 中文界面需要 CJK 字体（约 1 MB 字形表，占 flash 不占 RAM）。
 # 内置 CJK 字体是固定字表，缺常用字（实测方框），改用自己生成的 lv_font_ui_14/20，故关掉它省 160 KB。
 # CONFIG_LV_FONT_SOURCE_HAN_SANS_SC_14_CJK is not set

@@ -38,6 +38,7 @@ static volatile bool s_active;
 static volatile bool s_stop_req;
 static volatile uint32_t s_frames;
 static volatile uint32_t s_bytes;
+static volatile uint8_t s_level;
 static uint32_t s_session;
 static char s_session_hex[9];
 static int64_t s_start_us;
@@ -145,6 +146,19 @@ static void record_task(void *arg) {
             end_reason = 3;
             break;
         }
+        uint32_t sum_abs = 0;
+        int32_t peak = 0;
+        for (int i = 0; i < OGG_FRAME_SAMPLES; i++) {
+            int32_t v = pcm[i] < 0 ? -(int32_t)pcm[i] : (int32_t)pcm[i];
+            sum_abs += (uint32_t)v;
+            if (v > peak) peak = v;
+        }
+        // 人声平均幅度通常在 300..4000，混合均值与峰值映射到 0..100，轻声说话也有跳动。
+        uint32_t env = (sum_abs / OGG_FRAME_SAMPLES) * 2u + (uint32_t)(peak / 4);
+        uint32_t lvl = (env * 100u) / 4500u;
+        if (lvl > 100u) lvl = 100u;
+        s_level = (uint8_t)lvl;
+
         int n = opus_encode(s_enc, pcm, OGG_FRAME_SAMPLES, pkt, sizeof pkt);
         if (n < 0) {
             app_error_report(APP_E401_ENCODER, APP_SRC_RECORD, "opus_encode err=%d at frame %u",
@@ -193,6 +207,7 @@ static void record_task(void *arg) {
 
     opus_encoder_destroy(s_enc);
     s_enc = NULL;
+    s_level = 0;
     s_active = false;
     s_task = NULL;
     notify(false);
@@ -221,6 +236,7 @@ esp_err_t app_record_start(void) {
     snprintf(s_session_hex, sizeof s_session_hex, "%08x", (unsigned)s_session);
     s_frames = 0;
     s_bytes = 0;
+    s_level = 0;
     s_stop_req = false;
     s_start_us = esp_timer_get_time();
     s_active = true;
@@ -258,6 +274,10 @@ uint32_t app_record_elapsed_sec(void) {
 
 uint32_t app_record_bytes(void) {
     return s_bytes;
+}
+
+uint8_t app_record_level(void) {
+    return s_active ? s_level : 0;
 }
 
 const char *app_record_session_hex(void) {
