@@ -32,9 +32,17 @@ void app_ui_show_error(const char *short_text);
 
 // 背光 0..100。
 void app_ui_backlight(uint8_t percent);
+bool app_ui_is_screen_on(void);
 
 // 当前页。
 app_page_t app_ui_page(void);
+
+// PPT 翻页叠加状态显示（顶栏 PPT 徽标）。
+void app_ui_set_ppt_mode(bool on);
+bool app_ui_ppt_mode(void);
+
+// 录音页底部提示语（NULL 恢复默认"长按 OK 停止保存"）。
+void app_ui_set_record_hint(const char *text);
 
 // 最近一次交互的时间戳（微秒），用于无操作熄屏。
 int64_t app_ui_last_input_us(void);

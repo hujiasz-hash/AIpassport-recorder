@@ -106,12 +106,12 @@ static const lv_image_dsc_t s_rec_badge_dsc = {
 LV_DRAW_BUF_DEFINE_STATIC(s_octo_line_buf, OCTO_W, 1, LV_COLOR_FORMAT_RGB565);
 
 static lv_obj_t *s_scr_home, *s_scr_record, *s_scr_prov, *s_scr_error;
-static lv_obj_t *s_home_time, *s_home_batt, *s_home_link, *s_home_link_icon;
+static lv_obj_t *s_home_time, *s_home_batt, *s_home_link, *s_home_link_icon, *s_home_ppt_badge;
 static lv_obj_t *s_home_message, *s_home_octo;
 static lv_timer_t *s_octo_timer;
 
-static lv_obj_t *s_rec_link_icon, *s_rec_link, *s_rec_batt;
-static lv_obj_t *s_rec_dot, *s_rec_status_lbl, *s_rec_elapsed;
+static lv_obj_t *s_rec_link_icon, *s_rec_link, *s_rec_batt, *s_rec_ppt_badge, *s_rec_clock;
+static lv_obj_t *s_rec_dot, *s_rec_status_lbl, *s_rec_elapsed, *s_rec_hint;
 static lv_obj_t *s_rec_halo, *s_rec_waves[REC_WAVE_BARS];
 static lv_obj_t *s_rec_used_lbl, *s_rec_rem_lbl, *s_rec_bar_fill;
 static lv_timer_t *s_rec_wave_timer;
@@ -121,7 +121,8 @@ static lv_obj_t *s_prov_name, *s_prov_state;
 static lv_obj_t *s_error_text;
 static app_page_t s_page = APP_PAGE_HOME;
 static bool s_ui_ok;
-static uint8_t s_cur_backlight = BACKLIGHT_ON;
+static volatile bool s_ppt_mode;
+static volatile uint8_t s_cur_backlight = BACKLIGHT_ON;
 static int64_t s_last_input_us;
 static lv_timer_t *s_error_timer;
 
@@ -282,8 +283,11 @@ static void query_link_status(bool *connected, const char **status) {
 #endif
 }
 
+static lv_obj_t *make_round_box(lv_obj_t *parent, int x, int y, int w, int h,
+                                int radius, uint32_t bg_hex);
+
 static void build_top_bar(lv_obj_t *scr, lv_obj_t **out_icon, lv_obj_t **out_link,
-                          lv_obj_t **out_batt) {
+                          lv_obj_t **out_ppt, lv_obj_t **out_batt) {
 #ifdef CONFIG_PASSPORT_WIFI_LEGACY
     const char *link_icon = LV_SYMBOL_WIFI;
     const char *link_text = "网络未连接";
@@ -295,6 +299,13 @@ static void build_top_bar(lv_obj_t *scr, lv_obj_t **out_icon, lv_obj_t **out_lin
     lv_obj_align(*out_icon, LV_ALIGN_TOP_LEFT, 22, 9);
     *out_link = ui_pixel_label(scr, link_text, FONT_CN, HOME_MUTED);
     lv_obj_align(*out_link, LV_ALIGN_TOP_LEFT, 47, 13);
+
+    lv_obj_t *ppt_box = make_round_box(scr, 128, 10, 38, 18, 9, UI_SKY_DARK);
+    lv_obj_t *ppt_lbl = ui_pixel_label(ppt_box, "PPT", &lv_font_montserrat_14, UI_PAPER);
+    lv_obj_center(ppt_lbl);
+    if (!s_ppt_mode) lv_obj_add_flag(ppt_box, LV_OBJ_FLAG_HIDDEN);
+    *out_ppt = ppt_box;
+
     *out_batt = ui_pixel_label(scr, "-- " LV_SYMBOL_BATTERY_EMPTY,
                                &lv_font_montserrat_14, HOME_MUTED);
     lv_obj_align(*out_batt, LV_ALIGN_TOP_RIGHT, -22, 13);
@@ -351,7 +362,7 @@ static void build_home(void) {
     lv_obj_set_style_border_width(s_scr_home, 0, 0);
     lv_obj_set_style_pad_all(s_scr_home, 0, 0);
 
-    build_top_bar(s_scr_home, &s_home_link_icon, &s_home_link, &s_home_batt);
+    build_top_bar(s_scr_home, &s_home_link_icon, &s_home_link, &s_home_ppt_badge, &s_home_batt);
 
     s_home_time = ui_pixel_label(s_scr_home, "--:--", &lv_font_montserrat_48, UI_INK);
     lv_obj_align(s_home_time, LV_ALIGN_TOP_MID, 0, 34);
@@ -386,14 +397,16 @@ static void build_record(void) {
     lv_obj_set_style_pad_all(s_scr_record, 0, 0);
 
     // 1. 顶栏与主页同坐标对齐
-    build_top_bar(s_scr_record, &s_rec_link_icon, &s_rec_link, &s_rec_batt);
+    build_top_bar(s_scr_record, &s_rec_link_icon, &s_rec_link, &s_rec_ppt_badge, &s_rec_batt);
 
-    // 2. 正在录音状态胶囊 + 圆形呼吸红点
-    lv_obj_t *pill = make_round_box(s_scr_record, 72, 36, 96, 22, 11, REC_PILL_BG);
+    // 2. 正在录音状态胶囊 + 圆形呼吸红点 + 当前北京时间
+    lv_obj_t *pill = make_round_box(s_scr_record, 44, 36, 96, 22, 11, REC_PILL_BG);
     s_rec_dot = make_round_box(pill, 12, 6, 10, 10, 5, UI_RED);
     lv_obj_set_style_opa(s_rec_dot, LV_OPA_TRANSP, 0);
     s_rec_status_lbl = ui_pixel_label(pill, "正在录音", FONT_CN, UI_RED);
     lv_obj_set_pos(s_rec_status_lbl, 28, 3);
+    s_rec_clock = ui_pixel_label(s_scr_record, "--:--", &lv_font_montserrat_14, HOME_MUTED);
+    lv_obj_set_pos(s_rec_clock, 150, 39);
 
     // 3. 48 号大字录音计时
     s_rec_elapsed = ui_pixel_label(s_scr_record, "00:00", &lv_font_montserrat_48, UI_INK);
@@ -433,8 +446,8 @@ static void build_record(void) {
     s_rec_bar_fill = make_round_box(track, 0, 0, 4, 6, 3, UI_SKY_DARK);
 
     // 6. 底部操作提示
-    lv_obj_t *hint = ui_pixel_label(s_scr_record, "按 OK 停止保存", FONT_CN, HOME_MUTED);
-    lv_obj_align(hint, LV_ALIGN_TOP_MID, 0, 286);
+    s_rec_hint = ui_pixel_label(s_scr_record, "长按 OK 停止保存", FONT_CN, HOME_MUTED);
+    lv_obj_align(s_rec_hint, LV_ALIGN_TOP_MID, 0, 286);
 
     s_rec_wave_timer = lv_timer_create(rec_wave_tick, 140, NULL);
     lv_timer_pause(s_rec_wave_timer);
@@ -584,9 +597,17 @@ void app_ui_refresh_home(void) {
     if (!app_config_ready()) message = "长按 OK 进入配网";
 #else
     uint32_t key = app_ble_passkey();
+    uint32_t msg_col = HOME_MUTED;
     if (key != UINT32_MAX) {
         snprintf(time_s, sizeof time_s, "%06u", (unsigned)key);
-        message = "配对码 请在 Mac 输入";
+        message = "请在端上验证六位配对码";
+        msg_col = UI_SKY_DARK;
+    } else if (app_ble_pairing_open() && !connected) {
+        message = "等待蓝牙配对 按 OK 取消";
+        msg_col = UI_SKY_DARK;
+    } else if (s_ppt_mode && !app_store_full()) {
+        message = "PPT 上下页功能已开";
+        msg_col = UI_SKY_DARK;
     }
 #endif
 
@@ -599,6 +620,9 @@ void app_ui_refresh_home(void) {
                                     lv_color_hex(connected ? UI_SKY_DARK : HOME_MUTED), 0);
     }
     set_label(s_home_message, message);
+#ifndef CONFIG_PASSPORT_WIFI_LEGACY
+    lv_obj_set_style_text_color(s_home_message, lv_color_hex(msg_col), 0);
+#endif
     if (s_octo_timer && s_page == APP_PAGE_HOME &&
         esp_timer_get_time() - s_last_input_us < SCREEN_OFF_US) {
         lv_timer_resume(s_octo_timer);
@@ -623,6 +647,15 @@ void app_ui_refresh_record(uint32_t elapsed_sec, uint32_t bytes) {
         snprintf(t, sizeof t, "%02u:%02u",
                  (unsigned)(elapsed_sec / 60u),
                  (unsigned)(elapsed_sec % 60u));
+    }
+
+    char clock_s[12] = "--:--";
+    time_t now_ts = app_net_now();
+    if (now_ts) {
+        now_ts += 8 * 60 * 60;
+        struct tm tm;
+        gmtime_r(&now_ts, &tm);
+        strftime(clock_s, sizeof clock_s, "%H:%M", &tm);
     }
 
     char batt[24];
@@ -673,6 +706,7 @@ void app_ui_refresh_record(uint32_t elapsed_sec, uint32_t bytes) {
 
     if (!bsp_lvgl_lock(200)) return;
     set_label(s_rec_batt, batt);
+    set_label(s_rec_clock, clock_s);
     if (strcmp(lv_label_get_text(s_rec_link), status) != 0) {
         set_label(s_rec_link, status);
         lv_obj_set_style_text_color(s_rec_link_icon,
@@ -690,6 +724,10 @@ void app_ui_refresh_record(uint32_t elapsed_sec, uint32_t bytes) {
     lv_obj_set_width(s_rec_bar_fill, bar_w);
     lv_obj_set_style_bg_color(s_rec_bar_fill,
                               lv_color_hex(warn_cache ? UI_RED : UI_SKY_DARK), 0);
+    if (s_rec_wave_timer && s_page == APP_PAGE_RECORDING &&
+        esp_timer_get_time() - s_last_input_us < SCREEN_OFF_US) {
+        lv_timer_resume(s_rec_wave_timer);
+    }
     bsp_lvgl_unlock();
 }
 
@@ -705,6 +743,40 @@ void app_ui_backlight(uint8_t percent) {
     set_backlight_cached(percent);
 }
 
+bool app_ui_is_screen_on(void) {
+    return s_cur_backlight > 0;
+}
+
+void app_ui_set_ppt_mode(bool on) {
+    s_ppt_mode = on;
+    if (!s_ui_ok) return;
+    if (!bsp_lvgl_lock(200)) return;
+    if (s_home_ppt_badge) {
+        if (on) lv_obj_remove_flag(s_home_ppt_badge, LV_OBJ_FLAG_HIDDEN);
+        else lv_obj_add_flag(s_home_ppt_badge, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (s_rec_ppt_badge) {
+        if (on) lv_obj_remove_flag(s_rec_ppt_badge, LV_OBJ_FLAG_HIDDEN);
+        else lv_obj_add_flag(s_rec_ppt_badge, LV_OBJ_FLAG_HIDDEN);
+    }
+    bsp_lvgl_unlock();
+}
+
+bool app_ui_ppt_mode(void) {
+    return s_ppt_mode;
+}
+
+void app_ui_set_record_hint(const char *text) {
+    if (!s_ui_ok || !s_rec_hint) return;
+    const char *msg = text ? text : "长按 OK 停止保存";
+    uint32_t col = text ? UI_RED : HOME_MUTED;
+    if (!bsp_lvgl_lock(200)) return;
+    set_label(s_rec_hint, msg);
+    lv_obj_set_style_text_color(s_rec_hint, lv_color_hex(col), 0);
+    lv_obj_align(s_rec_hint, LV_ALIGN_TOP_MID, 0, 286);
+    bsp_lvgl_unlock();
+}
+
 void app_ui_note_input(void) {
     s_last_input_us = esp_timer_get_time();
     set_backlight_cached(BACKLIGHT_ON);
@@ -716,16 +788,19 @@ int64_t app_ui_last_input_us(void) {
 
 void app_ui_idle_tick(void) {
     if (!s_ui_ok) return;
+    if (s_page == APP_PAGE_PROV) return;
+#ifndef CONFIG_PASSPORT_WIFI_LEGACY
+    if (app_ble_passkey() != UINT32_MAX || app_ble_pairing_open()) {
+        set_backlight_cached(BACKLIGHT_ON);
+        return;
+    }
+#endif
     int64_t idle_us = esp_timer_get_time() - s_last_input_us;
     if (idle_us < SCREEN_OFF_US) return;
 
-    if (s_page == APP_PAGE_RECORDING) {
-        // 录音中无按键满 30 秒降为微亮省电，保留计时与声波常显。
-        set_backlight_cached(BACKLIGHT_DIM);
-        return;
-    }
-    if (s_octo_timer && bsp_lvgl_lock(200)) {
-        lv_timer_pause(s_octo_timer);
+    if (s_cur_backlight > 0 && bsp_lvgl_lock(200)) {
+        if (s_octo_timer) lv_timer_pause(s_octo_timer);
+        if (s_rec_wave_timer) lv_timer_pause(s_rec_wave_timer);
         bsp_lvgl_unlock();
     }
     set_backlight_cached(0);

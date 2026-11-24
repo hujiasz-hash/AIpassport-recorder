@@ -1,12 +1,16 @@
-// AI Passport 主流程：主页 → 录音 → 上传；长按 OK 进网页配网。
+// AI Passport 主流程与统一按键状态机（参见 docs/button-design.md）。
 //
-// 按键约定（三键共用一个 ADC 引脚，不能同时按）：
-//   OK   单击  开始/停止录音；错误页上返回主页
-//   OK   长按  进入网页配网（设备开热点，手机连上后填表；配网中长按退出）
-//   上/下      预留（当前无动作）
+// 按键硬件边界（三键共用 GPIO0/ADC1_CH0 分压电阻网络，严禁双键组合）：
+//   OK   单击：熄屏仅亮屏看时间；亮屏待机立即开始会议录音；录音中仅亮屏看时长；错误页返回
+//   OK   长按：会议录音中按住满 1.5s 停止并保存（防翻页误触）；待机预留语音输入 PTT
+//   DOWN 单击：PPT 开启时发下一页（双击兜底连发 2 次，熄屏盲翻不亮屏）；PPT 关闭时点亮屏幕
+//   DOWN 长按：按住满 3.0s 开启/关闭 [PPT 翻页] 叠加状态（待机与会议录音中均可随时切换）
+//   UP   单击：PPT 开启时发上一页（双击兜底连发 2 次，熄屏盲翻不亮屏）；PPT 关闭时点亮屏幕
+//   UP   长按：仅在待机且 PPT 关闭时，按住满 3.0s 触发蓝牙重新配对
 //
 // 按键回调运行在 button 组件的 esp_timer 任务里，绝对不能阻塞，
-// 所以回调只置请求标志，真正的动作在主循环里做。
+// 所以回调只写原子请求标志，真正的动作全部在 50ms 节拍的主循环里做。
+#include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -27,21 +31,43 @@
 
 #define TAG "main"
 
-#define TICK_MS 1000
+#define TICK_MS              50
+#define UI_REFRESH_US        (1000LL * 1000)
+#define BSP_LONG_START_US    (500LL * 1000)
+#define HOLD_STOP_REC_US     (1500LL * 1000)
+#define HOLD_PPT_TOGGLE_US   (3000LL * 1000)
+#define HOLD_BLE_PAIR_US     (3000LL * 1000)
+#define REC_HINT_RESET_US    (2200LL * 1000)
 
-// 主循环之外只允许写这几个标志。
+// 主循环之外（on_key 回调）只允许写这组原子/易失标志，绝不阻塞或拿 LVGL/BLE 锁。
 static volatile bool s_prov_wanted;
-static volatile bool s_req_toggle_record;
-static volatile bool s_req_back_home;
-static volatile bool s_req_enter_prov;
-static volatile bool s_req_pair;
-static volatile bool s_req_adv;
-static volatile bool s_req_leave_prov;
+static atomic_bool s_ppt_mode;
+static atomic_bool s_press_was_screen_off;
+static atomic_bool s_req_wake_screen;
+static atomic_bool s_req_start_record;
+static atomic_bool s_req_rec_short_hint;
+static atomic_bool s_req_back_home;
+static atomic_bool s_req_cancel_pair;
+static atomic_bool s_req_enter_prov;
+static atomic_bool s_req_leave_prov;
+static atomic_uint s_req_page_next;
+static atomic_uint s_req_page_prev;
+
+static volatile bool s_ok_holding_rec;
+static volatile int64_t s_ok_hold_start_us;
+static volatile bool s_down_holding_ppt;
+static volatile int64_t s_down_hold_start_us;
+static volatile bool s_up_holding_pair;
+static volatile int64_t s_up_hold_start_us;
+
+static int64_t s_rec_hint_until_us;
 static uint32_t s_seen_err_seq;   // 已经弹过屏的错误序号
 
 static void record_state_cb(bool active, void *user) {
     (void)user;
     if (active) {
+        s_rec_hint_until_us = 0;
+        app_ui_set_record_hint(NULL);
         app_ui_set_page(APP_PAGE_RECORDING);
         app_ui_rec_led(true);
         app_log(TAG, "record started session=%s", app_record_session_hex());
@@ -49,7 +75,10 @@ static void record_state_cb(bool active, void *user) {
         app_ble_notify_recording(true, 0);
 #endif
     } else {
+        s_ok_holding_rec = false;
+        s_rec_hint_until_us = 0;
         app_ui_rec_led(false);
+        app_ui_set_record_hint(NULL);
         app_ui_set_page(APP_PAGE_HOME);
         app_log(TAG, "record stopped session=%s bytes=%u",
                 app_record_session_hex(), (unsigned)app_record_bytes());
@@ -64,67 +93,232 @@ static void record_state_cb(bool active, void *user) {
 
 static void on_key(bsp_btn_t btn, bsp_btn_ev_t ev, void *user) {
     (void)user;
-    if (ev == BSP_BTN_PRESS) {
-        // 按下就点亮屏幕。
-        app_ui_note_input();
-        return;
-    }
-    if (btn == BSP_BTN_UP && ev == BSP_BTN_LONG) s_req_adv = true;
-    if (btn != BSP_BTN_OK) return;
+    bool ppt = atomic_load(&s_ppt_mode);
+    app_page_t page = app_ui_page();
 
-    if (ev == BSP_BTN_LONG) {
-#ifdef CONFIG_PASSPORT_WIFI_LEGACY
-        if (app_ui_page() == APP_PAGE_PROV) {
-            s_req_leave_prov = true;
-        } else {
-            s_req_enter_prov = true;
-        }
-#else
-        s_req_pair = true;
+    if (ev == BSP_BTN_PRESS) {
+        bool was_off = !app_ui_is_screen_on();
+        atomic_store(&s_press_was_screen_off, was_off);
+        // PPT 开启且不在特殊弹窗页时，熄屏按 UP/DOWN 直接盲翻，不亮大屏晃眼。
+        bool blind_ppt_key = ppt && (btn == BSP_BTN_UP || btn == BSP_BTN_DOWN) &&
+                             page != APP_PAGE_ERROR && page != APP_PAGE_PROV
+#ifndef CONFIG_PASSPORT_WIFI_LEGACY
+                             && app_ble_passkey() == UINT32_MAX
 #endif
+                             ;
+        if (!blind_ppt_key) {
+            atomic_store(&s_req_wake_screen, true);
+        }
         return;
     }
-    if (ev != BSP_BTN_CLICK) return;
-    if (app_ui_page() == APP_PAGE_ERROR) {
-        s_req_back_home = true;
+
+    if (ev == BSP_BTN_RELEASE) {
+        if (btn == BSP_BTN_OK && s_ok_holding_rec) {
+            s_ok_holding_rec = false;
+            atomic_store(&s_req_rec_short_hint, true);
+        }
+        if (btn == BSP_BTN_DOWN) {
+            s_down_holding_ppt = false;
+        }
+        if (btn == BSP_BTN_UP) {
+            s_up_holding_pair = false;
+        }
         return;
     }
-    if (app_ui_page() == APP_PAGE_PROV) return;   // 配网页由手机端驱动
-    s_req_toggle_record = true;
+
+    // 全局优先级 1：错误页（OK 单击返回，其余按键仅亮屏）
+    if (page == APP_PAGE_ERROR) {
+        if (btn == BSP_BTN_OK && ev == BSP_BTN_CLICK) {
+            atomic_store(&s_req_back_home, true);
+        }
+        return;
+    }
+
+#ifdef CONFIG_PASSPORT_WIFI_LEGACY
+    // 旧版 Wi-Fi 配网页兼容分支
+    if (page == APP_PAGE_PROV) {
+        if (btn == BSP_BTN_OK && ev == BSP_BTN_LONG) {
+            atomic_store(&s_req_leave_prov, true);
+        }
+        return;
+    }
+#else
+    // 全局优先级 2：正在显示 6 位配对码或手动开启等待蓝牙配对时，单击取消配对窗口
+    if (app_ble_passkey() != UINT32_MAX) {
+        if (ev == BSP_BTN_CLICK) {
+            atomic_store(&s_req_cancel_pair, true);
+        }
+        return;
+    }
+    if (app_ble_pairing_open() && !app_ble_connected()) {
+        if (btn == BSP_BTN_OK && ev == BSP_BTN_CLICK) {
+            atomic_store(&s_req_cancel_pair, true);
+        }
+        return;
+    }
+#endif
+
+    // ---- OK 键分发（零延迟单击 + 录音长按 1.5s 停录） ----------------------
+    if (btn == BSP_BTN_OK) {
+        if (ev == BSP_BTN_CLICK || ev == BSP_BTN_DOUBLE) {
+            if (app_record_active()) {
+                // 录音中短按只点亮屏幕看时间/时长，绝不停录（防止翻页误碰断录）
+                atomic_store(&s_req_wake_screen, true);
+                atomic_store(&s_req_rec_short_hint, true);
+                return;
+            }
+            if (atomic_load(&s_press_was_screen_off)) {
+                // 熄屏首按只亮屏看时间，吞掉开录动作
+                return;
+            }
+            atomic_store(&s_req_start_record, true);
+            return;
+        }
+        if (ev == BSP_BTN_LONG) {
+            atomic_store(&s_req_wake_screen, true);
+            if (app_record_active()) {
+                s_ok_hold_start_us = esp_timer_get_time() - BSP_LONG_START_US;
+                s_ok_holding_rec = true;
+            } else {
+#ifdef CONFIG_PASSPORT_WIFI_LEGACY
+                atomic_store(&s_req_enter_prov, true);
+#endif
+                // BLE 模式下待机长按 OK 预留给阶段 3 语音输入 PTT，绝不再触发删绑定重配对
+            }
+            return;
+        }
+        return;
+    }
+
+    // ---- DOWN 键分发（PPT 下一页 & 长按 3s 开关 PPT 模式） -----------------
+    if (btn == BSP_BTN_DOWN) {
+        if (ppt && (ev == BSP_BTN_CLICK || ev == BSP_BTN_DOUBLE)) {
+            atomic_fetch_add(&s_req_page_next, ev == BSP_BTN_DOUBLE ? 2u : 1u);
+            return;
+        }
+        if (ev == BSP_BTN_LONG) {
+            s_down_hold_start_us = esp_timer_get_time() - BSP_LONG_START_US;
+            s_down_holding_ppt = true;
+        }
+        return;
+    }
+
+    if (btn == BSP_BTN_UP) {
+        if (ppt && (ev == BSP_BTN_CLICK || ev == BSP_BTN_DOUBLE)) {
+            atomic_fetch_add(&s_req_page_prev, ev == BSP_BTN_DOUBLE ? 2u : 1u);
+            return;
+        }
+#ifndef CONFIG_PASSPORT_WIFI_LEGACY
+        if (ev == BSP_BTN_LONG && !ppt && !app_record_active()) {
+            s_up_hold_start_us = esp_timer_get_time() - BSP_LONG_START_US;
+            s_up_holding_pair = true;
+        }
+#endif
+    }
 }
 
-// 处理按键请求。阻塞操作（停录音、开热点）只在这里做。
+// 处理按键请求与长按计时门限。阻塞操作（启停录音、BLE 控制、LVGL 刷新）只在这里做。
 static void handle_requests(void) {
-    if (s_req_pair) {
-        s_req_pair = false;
-        app_ble_allow_pairing();
+    int64_t now = esp_timer_get_time();
+
+    if (atomic_exchange(&s_req_wake_screen, false)) {
+        app_ui_note_input();
+#ifndef CONFIG_PASSPORT_WIFI_LEGACY
+        if (!app_ble_connected()) {
+            app_ble_advertise_for(0);
+        }
+#endif
     }
-    if (s_req_adv) {
-        s_req_adv = false;
-        app_ble_advertise_for(0);
-        app_log(TAG, "advertising retry forced");
-    }
-    if (s_req_back_home) {
-        s_req_back_home = false;
-        app_ui_set_page(APP_PAGE_HOME);
+
+    if (atomic_exchange(&s_req_back_home, false)) {
+        app_ui_set_page(app_record_active() ? APP_PAGE_RECORDING : APP_PAGE_HOME);
         app_error_clear();
     }
-    if (s_req_enter_prov) {
-        s_req_enter_prov = false;
+
+#ifndef CONFIG_PASSPORT_WIFI_LEGACY
+    if (atomic_exchange(&s_req_cancel_pair, false)) {
+        app_ble_cancel_pairing();
+        app_ui_refresh_home();
+    }
+#endif
+
+    // 3.0 秒长按 DOWN 开启/关闭 PPT 翻页模式（待机与会议录音中均可随时切换，点亮屏幕提示）
+    if (s_down_holding_ppt && (now - s_down_hold_start_us >= HOLD_PPT_TOGGLE_US)) {
+        s_down_holding_ppt = false;
+        bool next_ppt = !atomic_load(&s_ppt_mode);
+        atomic_store(&s_ppt_mode, next_ppt);
+        app_ui_note_input();
+        app_ui_set_ppt_mode(next_ppt);
+        if (app_ui_page() == APP_PAGE_HOME) {
+            app_ui_refresh_home();
+        } else if (app_ui_page() == APP_PAGE_RECORDING) {
+            app_ui_refresh_record(app_record_elapsed_sec(), app_record_bytes());
+        }
+        app_log(TAG, "ppt mode -> %s (after 3.0s DOWN hold)", next_ppt ? "ON" : "OFF");
+    }
+
+#ifndef CONFIG_PASSPORT_WIFI_LEGACY
+    unsigned next_cnt = atomic_exchange(&s_req_page_next, 0u);
+    if (next_cnt > 0) {
+        if (next_cnt > 4u) next_cnt = 4u;
+        (void)app_ble_notify_key(APP_BLE_KEY_NEXT, (uint8_t)next_cnt);
+    }
+    unsigned prev_cnt = atomic_exchange(&s_req_page_prev, 0u);
+    if (prev_cnt > 0) {
+        if (prev_cnt > 4u) prev_cnt = 4u;
+        (void)app_ble_notify_key(APP_BLE_KEY_PREV, (uint8_t)prev_cnt);
+    }
+#endif
+
+    if (atomic_exchange(&s_req_enter_prov, false)) {
         app_log(TAG, "enter prov by long press");
         s_prov_wanted = true;
     }
-    if (s_req_leave_prov) {
-        s_req_leave_prov = false;
+    if (atomic_exchange(&s_req_leave_prov, false)) {
         app_log(TAG, "leave prov by long press");
         s_prov_wanted = false;
     }
-    if (s_req_toggle_record) {
-        s_req_toggle_record = false;
+
+    if (atomic_exchange(&s_req_rec_short_hint, false)) {
         if (app_record_active()) {
-            app_log(TAG, "stop requested by key");
+            app_ui_set_record_hint("请长按 1.5 秒停止");
+            s_rec_hint_until_us = now + REC_HINT_RESET_US;
+        }
+    }
+    if (s_rec_hint_until_us && now >= s_rec_hint_until_us) {
+        s_rec_hint_until_us = 0;
+        app_ui_set_record_hint(NULL);
+    }
+
+    // 1.5 秒长按 OK 停止会议录音（到达门限立即停录，无需等松手）
+    if (s_ok_holding_rec) {
+        if (!app_record_active()) {
+            s_ok_holding_rec = false;
+        } else if (now - s_ok_hold_start_us >= HOLD_STOP_REC_US) {
+            s_ok_holding_rec = false;
+            app_log(TAG, "stop record after 1.5s OK hold");
             app_record_stop();
-        } else {
+        }
+    }
+
+#ifndef CONFIG_PASSPORT_WIFI_LEGACY
+    // 3.0 秒长按 UP 重新配对蓝牙（仅在待机且 PPT 关闭下允许）
+    if (s_up_holding_pair) {
+        if (app_record_active() || atomic_load(&s_ppt_mode)) {
+            s_up_holding_pair = false;
+        } else if (now - s_up_hold_start_us >= HOLD_BLE_PAIR_US) {
+            s_up_holding_pair = false;
+            app_log(TAG, "BLE re-pairing triggered after 3.0s UP hold");
+            app_ui_note_input();
+            app_ble_allow_pairing();
+            app_ui_set_page(APP_PAGE_HOME);
+            app_ui_refresh_home();
+        }
+    }
+#endif
+
+    if (atomic_exchange(&s_req_start_record, false)) {
+        if (!app_record_active()) {
             esp_err_t err = app_record_start();
             if (err != ESP_OK) {
                 // 具体错误码已由 app_record_start 写串口，这里只负责显示在屏幕上。
@@ -230,42 +424,58 @@ void app_main(void) {
     int64_t last_upload_kick = 0;
 #endif
 
+    int64_t last_slow_tick_us = 0;
+
     for (;;) {
         handle_requests();
+        int64_t now_us = esp_timer_get_time();
+        bool do_slow = (now_us - last_slow_tick_us >= UI_REFRESH_US);
 #ifdef CONFIG_PASSPORT_WIFI_LEGACY
-        prov_tick();
-
-        // 配网刚写完配置：由 app_prov 调 apply_credentials，这里只补一次保险。
-        if (!net_started && app_config_ready()) {
-            app_net_apply_credentials();
-            net_started = true;
-        }
-
-        // 刚联网时踢一次就够了。之后上传任务自己按周期跑，失败还有退避；
-        // 这里再每 60 s 踢一次会把退避打断，退化成固定 60 s 硬重试。
-        if (net_started && !last_upload_kick && app_net_state() == APP_NET_CONNECTED) {
-            app_upload_kick();
-            last_upload_kick = esp_timer_get_time();
+        if (do_slow) {
+            prov_tick();
+            if (!net_started && app_config_ready()) {
+                app_net_apply_credentials();
+                net_started = true;
+            }
+            if (net_started && !last_upload_kick && app_net_state() == APP_NET_CONNECTED) {
+                app_upload_kick();
+                last_upload_kick = now_us;
+            }
         }
 #else
-        app_ble_reclaim_if_idle();
+        if (do_slow) {
+            app_ble_reclaim_if_idle();
+        }
         static uint32_t last_key = UINT32_MAX;
+        static bool last_ble_conn = false;
         static bool last_ready = false;
         uint32_t key = app_ble_passkey();
-        bool connected = app_ble_ready();
+        bool ble_conn = app_ble_connected();
+        bool ready = app_ble_ready();
         if (key != UINT32_MAX && key != last_key) {
             app_ui_set_page(APP_PAGE_HOME);
             app_ui_note_input();
+            app_ui_refresh_home();
             app_log(TAG, "showing pairing code on home page");
-        } else if (connected && !last_ready) {
+        } else if (ble_conn != last_ble_conn) {
             app_ui_note_input();
+            do_slow = true;
+        }
+        if (ready && !last_ready) {
             app_ble_notify_recording(app_record_active(), app_record_elapsed_sec());
+            do_slow = true;
+        } else if (key == UINT32_MAX && last_key != UINT32_MAX) {
+            do_slow = true;
         }
         last_key = key;
-        last_ready = connected;
+        last_ble_conn = ble_conn;
+        last_ready = ready;
 #endif
         error_tick();
-        ui_tick();
+        if (do_slow) {
+            last_slow_tick_us = now_us;
+            ui_tick();
+        }
         vTaskDelay(pdMS_TO_TICKS(TICK_MS));
     }
 }

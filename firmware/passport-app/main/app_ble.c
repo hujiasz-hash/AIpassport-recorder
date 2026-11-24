@@ -1,6 +1,7 @@
 #include "app_ble.h"
 #include "app_store.h"
 #include "app_record.h"
+#include "bsp_battery.h"
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_random.h"
@@ -16,7 +17,10 @@
 #include "host/util/util.h"
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
+#include "services/bas/ble_svc_bas.h"
+#include "services/dis/ble_svc_dis.h"
 #include "services/gap/ble_svc_gap.h"
+#include "services/gatt/ble_svc_gatt.h"
 #include <stdatomic.h>
 #include <string.h>
 #include <sys/time.h>
@@ -26,24 +30,73 @@
 #define NO_CONN BLE_HS_CONN_HANDLE_NONE
 #define PASSPORT_NAME "AI Passport"
 
+// 标准 USB HID 键盘键码（macOS / Windows / iOS / Android 通用演示翻页键）
+#define HID_KEY_PAGE_UP    0x4Bu
+#define HID_KEY_PAGE_DOWN  0x4Eu
+#define HID_APPEARANCE_KBD 0x03C1u
+
 #define PASSPORT_UUID(n) BLE_UUID128_INIT(0xdd,0x50,0xd6,0x53,0xef,0x1d,0x71,0xa5,0xb9,0x45,0xa4,0x68,n,0x01,0x16,0x94)
 static const ble_uuid128_t service = PASSPORT_UUID(1);
 static const ble_uuid128_t tx_uuid = PASSPORT_UUID(2);
 static const ble_uuid128_t rx_uuid = PASSPORT_UUID(3);
+static const ble_uuid16_t hid_svc_uuid     = BLE_UUID16_INIT(0x1812);
+static const ble_uuid16_t hid_info_uuid    = BLE_UUID16_INIT(0x2A4A);
+static const ble_uuid16_t hid_rpt_map_uuid = BLE_UUID16_INIT(0x2A4B);
+static const ble_uuid16_t hid_ctrl_pt_uuid = BLE_UUID16_INIT(0x2A4C);
+static const ble_uuid16_t hid_rpt_uuid     = BLE_UUID16_INIT(0x2A4D);
+static const ble_uuid16_t hid_proto_uuid   = BLE_UUID16_INIT(0x2A4E);
+static const ble_uuid16_t hid_rpt_ref_uuid = BLE_UUID16_INIT(0x2908);
+
+// 标准 8 字节键盘 Input Report（Report ID = 1）：修饰键(1B) + 保留(1B) + 6 键码(6B)
+static const uint8_t s_hid_report_map[] = {
+    0x05, 0x01,        // Usage Page (Generic Desktop)
+    0x09, 0x06,        // Usage (Keyboard)
+    0xA1, 0x01,        // Collection (Application)
+    0x85, 0x01,        //   Report ID (1)
+    0x05, 0x07,        //   Usage Page (Key Codes)
+    0x19, 0xE0,        //   Usage Minimum (224 - LeftCtrl)
+    0x29, 0xE7,        //   Usage Maximum (231 - RightGUI)
+    0x15, 0x00,        //   Logical Minimum (0)
+    0x25, 0x01,        //   Logical Maximum (1)
+    0x75, 0x01,        //   Report Size (1)
+    0x95, 0x08,        //   Report Count (8)
+    0x81, 0x02,        //   Input (Data, Variable, Absolute)
+    0x95, 0x01,        //   Report Count (1)
+    0x75, 0x08,        //   Report Size (8)
+    0x81, 0x01,        //   Input (Constant)
+    0x95, 0x06,        //   Report Count (6)
+    0x75, 0x08,        //   Report Size (8)
+    0x15, 0x00,        //   Logical Minimum (0)
+    0x25, 0x65,        //   Logical Maximum (101)
+    0x05, 0x07,        //   Usage Page (Key Codes)
+    0x19, 0x00,        //   Usage Minimum (0)
+    0x29, 0x65,        //   Usage Maximum (101)
+    0x81, 0x00,        //   Input (Data, Array)
+    0xC0               // End Collection
+};
+
 static uint16_t tx_handle;
+static uint16_t hid_rpt_handle;
+static uint8_t s_hid_proto_mode = 1; // 1 = Report Mode, 0 = Boot Mode
+static uint8_t s_hid_ctrl_pt = 0;
+static uint8_t s_hid_last_rpt[8];
+static atomic_bool hid_subscribed;
 static atomic_uint conn = NO_CONN;
 static atomic_bool ready;
 static atomic_bool subscribed;
+static atomic_bool manual_pair_active;
 static atomic_uint epoch;
 static atomic_uint passkey = UINT32_MAX;
 static atomic_uint pair_until;// boot-relative seconds
 static atomic_bool adv_kick;  // 立刻重试广播，跳过节流
 static uint8_t addr_type, device[6];
 static QueueHandle_t inbox;
+static QueueHandle_t hid_queue;
 static app_session_t sessions[96];
 static uint8_t window[WINDOW];
 
 typedef struct { unsigned gen; uint32_t value; uint8_t kind; } control_t;
+typedef struct { uint8_t action; uint8_t count; } hid_cmd_t;
 void ble_store_config_init(void);
 
 static uint32_t get32(const uint8_t *p) {
@@ -55,6 +108,18 @@ static void put32(uint8_t *p, uint32_t v) {
 
 bool app_ble_ready(void) { return atomic_load(&ready); }
 bool app_ble_connected(void) { return atomic_load(&conn) != NO_CONN; }
+bool app_ble_pairing_open(void) {
+    if (!atomic_load(&manual_pair_active)) return false;
+    if (esp_timer_get_time() / 1000000ULL >= atomic_load(&pair_until)) {
+        atomic_store(&manual_pair_active, false);
+        return false;
+    }
+    int count = 0;
+    if (ble_store_util_count(BLE_STORE_OBJ_TYPE_PEER_SEC, &count) == 0 && count > 0) {
+        return false;
+    }
+    return true;
+}
 uint32_t app_ble_passkey(void) {
     if (esp_timer_get_time() / 1000000ULL >= atomic_load(&pair_until)) return UINT32_MAX;
     return atomic_load(&passkey);
@@ -67,6 +132,7 @@ void app_ble_advertise_for(uint32_t seconds) {
 void app_ble_allow_pairing(void) {
     atomic_store(&passkey, UINT32_MAX);
     atomic_store(&pair_until, esp_timer_get_time() / 1000000ULL + 120);
+    atomic_store(&manual_pair_active, true);
     // A long press explicitly authorizes replacing a stale bond. Boot keeps it.
     ble_addr_t peer;
     int count = 0;
@@ -78,11 +144,24 @@ void app_ble_allow_pairing(void) {
     }
     uint16_t handle = atomic_load(&conn);
     if (handle != NO_CONN) ble_gap_terminate(handle, BLE_ERR_REM_USER_CONN_TERM);
+    atomic_store(&adv_kick, true);
 }
 
 static bool secure(uint16_t handle) {
     struct ble_gap_conn_desc desc;
     return ble_gap_conn_find(handle, &desc) == 0 && desc.sec_state.encrypted && desc.sec_state.authenticated && desc.sec_state.bonded;
+}
+
+void app_ble_cancel_pairing(void) {
+    atomic_store(&passkey, UINT32_MAX);
+    atomic_store(&pair_until, 0);
+    atomic_store(&manual_pair_active, false);
+    uint16_t handle = atomic_load(&conn);
+    if (handle != NO_CONN && !secure(handle)) {
+        ble_gap_terminate(handle, BLE_ERR_REM_USER_CONN_TERM);
+    }
+    atomic_store(&adv_kick, true);
+    ESP_LOGI(TAG, "pairing window cancelled by user");
 }
 
 static int gatt(uint16_t handle, uint16_t attr, struct ble_gatt_access_ctxt *ctx, void *arg) {
@@ -108,7 +187,83 @@ static int gatt(uint16_t handle, uint16_t attr, struct ble_gatt_access_ctxt *ctx
     return xQueueSend(inbox, &ctl, 0) == pdTRUE ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
 }
 
+static int hid_access(uint16_t handle, uint16_t attr, struct ble_gatt_access_ctxt *ctx, void *arg) {
+    (void)handle;
+    (void)attr;
+    (void)arg;
+    if (ctx->op == BLE_GATT_ACCESS_OP_READ_DSC) {
+        // Report Reference Descriptor (0x2908): Report ID = 1, Report Type = 1 (Input)
+        static const uint8_t rpt_ref[2] = { 0x01, 0x01 };
+        return os_mbuf_append(ctx->om, rpt_ref, sizeof rpt_ref) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
+    }
+    uint16_t uuid16 = ble_uuid_u16(ctx->chr->uuid);
+    switch (uuid16) {
+    case 0x2A4A: { // HID Information: USB HID 1.11, country 0, RemoteWake | NormallyConnectable
+        static const uint8_t hid_info[4] = { 0x11, 0x01, 0x00, 0x03 };
+        return os_mbuf_append(ctx->om, hid_info, sizeof hid_info) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
+    }
+    case 0x2A4B: // Report Map
+        return os_mbuf_append(ctx->om, s_hid_report_map, sizeof s_hid_report_map) == 0
+                   ? 0
+                   : BLE_ATT_ERR_INSUFFICIENT_RES;
+    case 0x2A4C: // HID Control Point (Write Without Response)
+        if (ctx->op == BLE_GATT_ACCESS_OP_WRITE_CHR) {
+            uint16_t len = 0;
+            (void)ble_hs_mbuf_to_flat(ctx->om, &s_hid_ctrl_pt, 1, &len);
+            return 0;
+        }
+        return BLE_ATT_ERR_READ_NOT_PERMITTED;
+    case 0x2A4E: // Protocol Mode
+        if (ctx->op == BLE_GATT_ACCESS_OP_READ_CHR) {
+            return os_mbuf_append(ctx->om, &s_hid_proto_mode, 1) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
+        }
+        if (ctx->op == BLE_GATT_ACCESS_OP_WRITE_CHR) {
+            uint8_t mode = 1;
+            uint16_t len = 0;
+            if (ble_hs_mbuf_to_flat(ctx->om, &mode, 1, &len) == 0 && len == 1 && mode <= 1) {
+                s_hid_proto_mode = mode;
+                return 0;
+            }
+            return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+        }
+        return BLE_ATT_ERR_UNLIKELY;
+    case 0x2A4D: // Input Report
+        if (ctx->op == BLE_GATT_ACCESS_OP_READ_CHR) {
+            return os_mbuf_append(ctx->om, s_hid_last_rpt, sizeof s_hid_last_rpt) == 0
+                       ? 0
+                       : BLE_ATT_ERR_INSUFFICIENT_RES;
+        }
+        return 0;
+    default:
+        return BLE_ATT_ERR_UNLIKELY;
+    }
+}
+
 static const struct ble_gatt_svc_def services[] = {
+    // 1. 标准 BLE HID 键盘服务（0x1812）：由 macOS / Windows / iPad 系统原生接管 PPT 翻页，无需打开任何 App
+    { .type = BLE_GATT_SVC_TYPE_PRIMARY, .uuid = &hid_svc_uuid.u,
+      .characteristics = (struct ble_gatt_chr_def[]) {
+          { .uuid = &hid_info_uuid.u, .access_cb = hid_access,
+            .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_READ_ENC },
+          { .uuid = &hid_rpt_map_uuid.u, .access_cb = hid_access,
+            .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_READ_ENC },
+          { .uuid = &hid_ctrl_pt_uuid.u, .access_cb = hid_access,
+            .flags = BLE_GATT_CHR_F_WRITE_NO_RSP | BLE_GATT_CHR_F_WRITE_ENC },
+          { .uuid = &hid_proto_uuid.u, .access_cb = hid_access,
+            .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE_NO_RSP |
+                     BLE_GATT_CHR_F_READ_ENC | BLE_GATT_CHR_F_WRITE_ENC },
+          { .uuid = &hid_rpt_uuid.u, .access_cb = hid_access,
+            .val_handle = &hid_rpt_handle,
+            .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY |
+                     BLE_GATT_CHR_F_READ_ENC | BLE_GATT_CHR_F_READ_AUTHEN,
+            .descriptors = (struct ble_gatt_dsc_def[]) {
+                { .uuid = &hid_rpt_ref_uuid.u, .access_cb = hid_access,
+                  .att_flags = BLE_ATT_F_READ | BLE_ATT_F_READ_ENC },
+                { 0 }
+            } },
+          { 0 }
+      } },
+    // 2. AI Passport 私有录音同步服务（94160101-...）：与 HID 共存同一物理连接
     { .type = BLE_GATT_SVC_TYPE_PRIMARY, .uuid = &service.u,
       .characteristics = (struct ble_gatt_chr_def[]) {
           { .uuid = &tx_uuid.u, .access_cb = gatt, .flags = BLE_GATT_CHR_F_NOTIFY, .val_handle = &tx_handle },
@@ -134,6 +289,7 @@ static int gap(struct ble_gap_event *ev, void *arg) {
         ESP_LOGW(TAG, "disconnect reason=%d handle=%d", ev->disconnect.reason, ev->disconnect.conn.conn_handle);
         atomic_store(&ready, false);
         atomic_store(&subscribed, false);
+        atomic_store(&hid_subscribed, false);
         atomic_store(&conn, NO_CONN);
         // Keep the code visible if the central disconnects while pairing is pending.
         atomic_fetch_add(&epoch, 1);
@@ -148,12 +304,19 @@ static int gap(struct ble_gap_event *ev, void *arg) {
                 atomic_store(&ready, false);
                 atomic_fetch_add(&epoch, 1);
             }
+        } else if (ev->subscribe.attr_handle == hid_rpt_handle) {
+            atomic_store(&hid_subscribed, ev->subscribe.cur_notify != 0);
+            ESP_LOGI(TAG, "HID report subscribe=%d", (int)ev->subscribe.cur_notify);
         }
         break;
     case BLE_GAP_EVENT_ENC_CHANGE:
         ESP_LOGI(TAG, "encryption change status=%d", ev->enc_change.status);
-        if (ev->enc_change.status == 0) atomic_store(&passkey, UINT32_MAX);
-        else ble_gap_terminate(ev->enc_change.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+        if (ev->enc_change.status == 0) {
+            atomic_store(&passkey, UINT32_MAX);
+            atomic_store(&manual_pair_active, false);
+        } else {
+            ble_gap_terminate(ev->enc_change.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+        }
         break;
     case BLE_GAP_EVENT_PASSKEY_ACTION: {
         int count = -1;
@@ -212,14 +375,18 @@ static void ensure_advertising(void) {
         return;
     }
 
-    // Flags + one 128-bit UUID use 21 bytes in the primary packet. The complete
-    // name uses 13 bytes in the scan response; each legacy packet is limited to 31.
-    struct ble_hs_adv_fields fields = { .flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP,
-        .uuids128 = &service, .num_uuids128 = 1, .uuids128_is_complete = 1 };
-    // 实验：在扫描响应里加 Appearance（4 字节），名字 13 字节，合计仍在 31 字节内。
-    struct ble_hs_adv_fields rsp = { .name = (const uint8_t *)PASSPORT_NAME,
+    // 主广播包（25 字节 ≤ 31）：Flags(3B) + HID 0x1812(4B, 供系统蓝牙面板识别键盘) + 128-bit 录音服务(18B, 供 App 扫描)
+    struct ble_hs_adv_fields fields = {
+        .flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP,
+        .uuids16 = &hid_svc_uuid, .num_uuids16 = 1, .uuids16_is_complete = 1,
+        .uuids128 = &service, .num_uuids128 = 1, .uuids128_is_complete = 1,
+    };
+    // 扫描响应包（17 字节 ≤ 31）：完整设备名 "AI Passport"(13B) + 键盘外观 0x03C1(4B)
+    struct ble_hs_adv_fields rsp = {
+        .name = (const uint8_t *)PASSPORT_NAME,
         .name_len = sizeof PASSPORT_NAME - 1, .name_is_complete = 1,
-        .appearance = 0x0200, .appearance_is_present = 1 };
+        .appearance = HID_APPEARANCE_KBD, .appearance_is_present = 1,
+    };
     rc = ble_gap_adv_set_fields(&fields);
     if (rc) {
         ESP_LOGW(TAG, "set advertising fields failed: %d", rc);
@@ -276,6 +443,42 @@ void app_ble_notify_recording(bool active, uint32_t elapsed_sec) {
     put32(frame + 2, active ? elapsed_sec : 0u);
     struct os_mbuf *msg = ble_hs_mbuf_from_flat(frame, sizeof frame);
     if (msg) (void)ble_gatts_notify_custom(h, tx_handle, msg);
+}
+
+bool app_ble_notify_key(uint8_t action, uint8_t count) {
+    if ((action != APP_BLE_KEY_NEXT && action != APP_BLE_KEY_PREV) || count == 0 || count > 4) {
+        return false;
+    }
+    if (!hid_queue || atomic_load(&conn) == NO_CONN) return false;
+    hid_cmd_t cmd = { .action = action, .count = count };
+    return xQueueSend(hid_queue, &cmd, 0) == pdTRUE;
+}
+
+static void hid_worker(void *unused) {
+    (void)unused;
+    hid_cmd_t cmd;
+    for (;;) {
+        if (!xQueueReceive(hid_queue, &cmd, portMAX_DELAY)) continue;
+        uint8_t keycode = (cmd.action == APP_BLE_KEY_NEXT) ? HID_KEY_PAGE_DOWN : HID_KEY_PAGE_UP;
+        for (uint8_t i = 0; i < cmd.count; i++) {
+            uint16_t h = atomic_load(&conn);
+            if (h == NO_CONN || !secure(h)) break;
+            uint8_t down[8] = { 0, 0, keycode, 0, 0, 0, 0, 0 };
+            uint8_t up[8]   = { 0, 0, 0, 0, 0, 0, 0, 0 };
+            memcpy(s_hid_last_rpt, down, sizeof s_hid_last_rpt);
+            struct os_mbuf *m_down = ble_hs_mbuf_from_flat(down, sizeof down);
+            if (!m_down || ble_gatts_notify_custom(h, hid_rpt_handle, m_down) != 0) {
+                ESP_LOGW(TAG, "HID key down failed key=0x%02x", keycode);
+                break;
+            }
+            vTaskDelay(pdMS_TO_TICKS(18));
+            memcpy(s_hid_last_rpt, up, sizeof s_hid_last_rpt);
+            struct os_mbuf *m_up = ble_hs_mbuf_from_flat(up, sizeof up);
+            if (m_up) (void)ble_gatts_notify_custom(h, hid_rpt_handle, m_up);
+            ESP_LOGI(TAG, "HID page key sent: 0x%02x (%u/%u)", keycode, (unsigned)(i + 1), (unsigned)cmd.count);
+            if (i + 1 < cmd.count) vTaskDelay(pdMS_TO_TICKS(28));
+        }
+    }
 }
 
 static bool ack(unsigned gen, uint8_t kind, uint32_t *value) {
@@ -343,9 +546,16 @@ static void sender(void *unused) {
     unsigned seen_gen = UINT32_MAX;
     uint32_t seen_session = 0, seen_bytes = 0;
     int64_t last_rec_beat = 0;
+    int64_t last_batt_sync = 0;
     bool was_rec = false;
     for (;;) {
         ensure_advertising();
+        int64_t now_loop = esp_timer_get_time();
+        if (now_loop - last_batt_sync >= 30000000LL) {
+            int soc = bsp_battery_soc();
+            if (soc >= 0 && soc <= 100) (void)ble_svc_bas_battery_level_set((uint8_t)soc);
+            last_batt_sync = now_loop;
+        }
         if (app_ble_ready()) {
             bool rec = app_record_active();
             int64_t now = esp_timer_get_time();
@@ -397,8 +607,9 @@ void app_ble_reclaim_if_idle(void) {
 
 void app_ble_init(void) {
     inbox = xQueueCreate(8, sizeof(control_t));
+    hid_queue = xQueueCreate(8, sizeof(hid_cmd_t));
     transfer = xSemaphoreCreateMutex();
-    if (!inbox || !transfer || esp_read_mac(device, ESP_MAC_BT) != ESP_OK || nimble_port_init() != ESP_OK) {
+    if (!inbox || !hid_queue || !transfer || esp_read_mac(device, ESP_MAC_BT) != ESP_OK || nimble_port_init() != ESP_OK) {
         ESP_LOGE(TAG, "BLE init failed; local recording still available");
         return;
     }
@@ -411,14 +622,24 @@ void app_ble_init(void) {
     ble_hs_cfg.sm_our_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
     ble_hs_cfg.sm_their_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
     ble_svc_gap_init();
+    ble_svc_gatt_init();
+    ble_svc_bas_init();
+    ble_svc_dis_init();
     ble_svc_gap_device_name_set(PASSPORT_NAME);
+    (void)ble_svc_gap_device_appearance_set(HID_APPEARANCE_KBD);
+    static const char pnp_id[7] = { 0x02, 0x3A, 0x30, 0x01, 0x03, 0x02, 0x00 }; // USB VID 0x303A (Espressif)
+    (void)ble_svc_dis_manufacturer_name_set("AI Passport");
+    (void)ble_svc_dis_pnp_id_set(pnp_id);
+    int init_soc = bsp_battery_soc();
+    if (init_soc >= 0 && init_soc <= 100) (void)ble_svc_bas_battery_level_set((uint8_t)init_soc);
     ble_store_config_init();
     if (ble_gatts_count_cfg(services) || ble_gatts_add_svcs(services)) {
         ESP_LOGE(TAG, "GATT registration failed");
         return;
     }
-    if (xTaskCreate(sender, "ble-send", 6144, NULL, 3, NULL) != pdPASS) {
-        ESP_LOGE(TAG, "BLE upload task allocation failed");
+    if (xTaskCreate(sender, "ble-send", 6144, NULL, 3, NULL) != pdPASS ||
+        xTaskCreate(hid_worker, "ble-hid", 3072, NULL, 4, NULL) != pdPASS) {
+        ESP_LOGE(TAG, "BLE task allocation failed");
         return;
     }
     nimble_port_freertos_init(host);
