@@ -1,0 +1,2 @@
+# Raw frame bytes must not be normalized on Windows checkout.
+firmware/passport-app/main/*.rgb565 binary

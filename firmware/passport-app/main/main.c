@@ -45,6 +45,9 @@ static void record_state_cb(bool active, void *user) {
         app_ui_set_page(APP_PAGE_RECORDING);
         app_ui_rec_led(true);
         app_log(TAG, "record started session=%s", app_record_session_hex());
+#ifndef CONFIG_PASSPORT_WIFI_LEGACY
+        app_ble_notify_recording(true, 0);
+#endif
     } else {
         app_ui_rec_led(false);
         app_ui_set_page(APP_PAGE_HOME);
@@ -53,6 +56,8 @@ static void record_state_cb(bool active, void *user) {
 #ifdef CONFIG_PASSPORT_WIFI_LEGACY
         // 停止后立刻尝试上传，别等 60 秒周期。
         app_upload_kick();
+#else
+        app_ble_notify_recording(false, 0);
 #endif
     }
 }
@@ -252,7 +257,10 @@ void app_main(void) {
             app_ui_set_page(APP_PAGE_HOME);
             app_ui_note_input();
             app_log(TAG, "showing pairing code on home page");
-        } else if (connected && !last_ready) app_ui_note_input();
+        } else if (connected && !last_ready) {
+            app_ui_note_input();
+            app_ble_notify_recording(app_record_active(), app_record_elapsed_sec());
+        }
         last_key = key;
         last_ready = connected;
 #endif

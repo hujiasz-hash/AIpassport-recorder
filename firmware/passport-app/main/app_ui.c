@@ -39,9 +39,26 @@ extern const lv_font_t lv_font_ui_20;
 #define FONT_CN &lv_font_ui_14
 #define FONT_BIG &lv_font_montserrat_20
 #define FONT_TITLE &lv_font_ui_20
+#define HOME_BG 0xF6F1E5
+#define HOME_MUTED 0x665648
+#define OCTO_W 184
+#define OCTO_H 192
+#define OCTO_COUNT 10
+#define OCTO_FRAME_BYTES (OCTO_W * OCTO_H * 2)
+#define OCTO_FRAME(i) { .header = { .magic = LV_IMAGE_HEADER_MAGIC, \
+    .cf = LV_COLOR_FORMAT_RGB565, .w = OCTO_W, .h = OCTO_H, .stride = OCTO_W * 2 }, \
+    .data_size = OCTO_FRAME_BYTES, .data = octobara_frames + (i) * OCTO_FRAME_BYTES }
+
+extern const uint8_t octobara_frames[];
+static const lv_image_dsc_t s_octo_frames[OCTO_COUNT] = {
+    OCTO_FRAME(0), OCTO_FRAME(1), OCTO_FRAME(2), OCTO_FRAME(3), OCTO_FRAME(4),
+    OCTO_FRAME(5), OCTO_FRAME(6), OCTO_FRAME(7), OCTO_FRAME(8), OCTO_FRAME(9),
+};
 
 static lv_obj_t *s_scr_home, *s_scr_record, *s_scr_prov, *s_scr_error;
-static lv_obj_t *s_home_time, *s_home_date, *s_home_batt, *s_home_pending, *s_home_hint;
+static lv_obj_t *s_home_time, *s_home_batt, *s_home_link, *s_home_link_icon;
+static lv_obj_t *s_home_message, *s_home_octo;
+static lv_timer_t *s_octo_timer;
 static lv_obj_t *s_rec_elapsed, *s_rec_bytes, *s_rec_dot, *s_prov_name, *s_prov_state;
 static lv_obj_t *s_error_text;
 static app_page_t s_page = APP_PAGE_HOME;
@@ -51,27 +68,45 @@ static lv_timer_t *s_error_timer;
 
 // ---- 各页构建 ------------------------------------------------------------
 
+static void octo_tick(lv_timer_t *timer) {
+    (void)timer;
+    static unsigned frame;
+    frame = (frame + 1) % OCTO_COUNT;
+    lv_image_set_src(s_home_octo, &s_octo_frames[frame]);
+}
+
 static void build_home(void) {
-    s_scr_home = ui_pixel_screen_create("AI PASSPORT", FONT_BIG);
+    s_scr_home = lv_obj_create(NULL);
+    lv_obj_remove_flag(s_scr_home, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(s_scr_home, lv_color_hex(HOME_BG), 0);
+    lv_obj_set_style_border_width(s_scr_home, 0, 0);
+    lv_obj_set_style_pad_all(s_scr_home, 0, 0);
 
-    lv_obj_t *panel = ui_pixel_panel_create(s_scr_home, 16, 58, 208, 126, UI_PAPER);
+#ifdef CONFIG_PASSPORT_WIFI_LEGACY
+    const char *link_icon = LV_SYMBOL_WIFI;
+    const char *link_text = "网络未连接";
+#else
+    const char *link_icon = LV_SYMBOL_BLUETOOTH;
+    const char *link_text = "蓝牙未连接";
+#endif
+    // FontAwesome 符号在 Montserrat，不在自带的中文子集里。
+    s_home_link_icon = ui_pixel_label(s_scr_home, link_icon, FONT_BIG, HOME_MUTED);
+    lv_obj_align(s_home_link_icon, LV_ALIGN_TOP_LEFT, 22, 9);
+    s_home_link = ui_pixel_label(s_scr_home, link_text, FONT_CN, HOME_MUTED);
+    lv_obj_align(s_home_link, LV_ALIGN_TOP_LEFT, 47, 13);
+    s_home_batt = ui_pixel_label(s_scr_home, "-- " LV_SYMBOL_BATTERY_EMPTY,
+                                 &lv_font_montserrat_14, HOME_MUTED);
+    lv_obj_align(s_home_batt, LV_ALIGN_TOP_RIGHT, -22, 13);
 
-    s_home_time = ui_pixel_label(panel, "--:--", FONT_BIG, UI_INK);
-    lv_obj_set_pos(s_home_time, 6, 2);
+    s_home_time = ui_pixel_label(s_scr_home, "--:--", &lv_font_montserrat_48, UI_INK);
+    lv_obj_align(s_home_time, LV_ALIGN_TOP_MID, 0, 34);
+    s_home_message = ui_pixel_label(s_scr_home, "时间未同步", FONT_CN, HOME_MUTED);
+    lv_obj_align(s_home_message, LV_ALIGN_TOP_MID, 0, 93);
 
-    s_home_date = ui_pixel_label(panel, "时间未同步", FONT_CN, UI_INK);
-    lv_obj_set_pos(s_home_date, 6, 36);
-
-    s_home_batt = ui_pixel_label(panel, "电量 --", FONT_CN, UI_INK);
-    lv_obj_set_pos(s_home_batt, 6, 62);
-
-    s_home_pending = ui_pixel_label(panel, "待传 --", FONT_CN, UI_INK);
-    lv_obj_set_pos(s_home_pending, 6, 88);
-
-    ui_pixel_mascot_create(s_scr_home, 186, 196);
-
-    s_home_hint = ui_pixel_label(s_scr_home, "OK 开始录音", FONT_CN, UI_PAPER);
-    lv_obj_set_pos(s_home_hint, 16, 208);
+    s_home_octo = lv_image_create(s_scr_home);
+    lv_image_set_src(s_home_octo, &s_octo_frames[0]);
+    lv_obj_align(s_home_octo, LV_ALIGN_TOP_MID, 0, 114);
+    s_octo_timer = lv_timer_create(octo_tick, 100, NULL);
 }
 
 static void build_record(void) {
@@ -180,6 +215,10 @@ void app_ui_set_page(app_page_t page) {
     }
     lv_screen_load(scr);
     s_page = page;
+    if (s_octo_timer) {
+        if (page == APP_PAGE_HOME) lv_timer_resume(s_octo_timer);
+        else lv_timer_pause(s_octo_timer);
+    }
     if (page == APP_PAGE_ERROR && s_error_timer) {
         lv_timer_reset(s_error_timer);
         lv_timer_resume(s_error_timer);
@@ -205,67 +244,56 @@ static void set_label(lv_obj_t *label, const char *text) {
 void app_ui_refresh_home(void) {
     if (!s_ui_ok) return;
     char time_s[12] = "--:--";
-    char date_s[32] = "时间未同步";
     time_t now = app_net_now();
+    const char *message = now ? "" : "时间未同步";
     if (now) {
+        // 主页显示北京时间；不改变录音和蓝牙协议使用的 Unix 时间戳。
+        now += 8 * 60 * 60;
         struct tm tm;
-        localtime_r(&now, &tm);
+        gmtime_r(&now, &tm);
         strftime(time_s, sizeof time_s, "%H:%M", &tm);
-        // strftime 的 %A 是英文星期，中文星期自己拼。
-        static const char *WD[] = {"周日", "周一", "周二", "周三", "周四", "周五", "周六"};
-        snprintf(date_s, sizeof date_s, "%d月%d日 %s", tm.tm_mon + 1, tm.tm_mday, WD[tm.tm_wday]);
     }
+    if (app_store_full()) message = "缓存已满 等上传";
 
-    char batt[24];
+    char batt[24] = "-- " LV_SYMBOL_BATTERY_EMPTY;
     int soc = bsp_battery_soc();
     if (soc >= 0) {
-        snprintf(batt, sizeof batt, "电量 %d%%", soc);
-    } else {
-        snprintf(batt, sizeof batt, "电量 --");
+        const char *icon = soc >= 90 ? LV_SYMBOL_BATTERY_FULL :
+                           soc >= 65 ? LV_SYMBOL_BATTERY_3 :
+                           soc >= 40 ? LV_SYMBOL_BATTERY_2 :
+                           soc >= 15 ? LV_SYMBOL_BATTERY_1 : LV_SYMBOL_BATTERY_EMPTY;
+        snprintf(batt, sizeof batt, "%d%% %s", soc, icon);
     }
 
-    char pend[32];
-    uint32_t pending = app_store_pending_bytes();
-    if (pending == 0) {
-        snprintf(pend, sizeof pend, "均已上传");
-    } else if (pending >= 1024) {
-        snprintf(pend, sizeof pend, "待传 %u KB", (unsigned)(pending / 1024));
-    } else {
-        snprintf(pend, sizeof pend, "待传 %u B", (unsigned)pending);
-    }
-
-    // 提示行优先显示最需要处理的一件事。
-    char hint[48];
+    bool connected;
+    const char *status;
 #ifdef CONFIG_PASSPORT_WIFI_LEGACY
-    if (!app_config_ready()) {
-        snprintf(hint, sizeof hint, "长按 OK 进入配网");
-    } else if (app_store_full()) {
-        snprintf(hint, sizeof hint, "缓存已满 等上传");
-    } else if (app_upload_state() == APP_UP_RUNNING) {
-        snprintf(hint, sizeof hint, "上传中");
-    } else {
-        snprintf(hint, sizeof hint, "OK 开始录音");
-    }
+    connected = app_net_state() == APP_NET_CONNECTED;
+    status = connected ? "网络已连接" : "网络未连接";
+    if (!app_config_ready()) message = "长按 OK 进入配网";
 #else
+    connected = app_ble_connected();
+    status = connected ? "蓝牙已连接" : "蓝牙未连接";
     uint32_t key = app_ble_passkey();
     if (key != UINT32_MAX) {
-        // Pairing is the current primary task: make the code impossible to miss.
         snprintf(time_s, sizeof time_s, "%06u", (unsigned)key);
-        snprintf(date_s, sizeof date_s, "配对码");
-        snprintf(batt, sizeof batt, "请在 Mac 输入");
-        pend[0] = '\0';
-        snprintf(hint, sizeof hint, "120 秒内完成配对");
+        message = "配对码 请在 Mac 输入";
     }
-    else if (app_store_full()) snprintf(hint, sizeof hint, "缓存已满 等上传");
-    else snprintf(hint, sizeof hint, "%s", app_ble_ready() ? "蓝牙已连接 OK 开始" : "蓝牙未连接 OK 开始");
 #endif
 
     if (!bsp_lvgl_lock(200)) return;
     set_label(s_home_time, time_s);
-    set_label(s_home_date, date_s);
     set_label(s_home_batt, batt);
-    set_label(s_home_pending, pend);
-    set_label(s_home_hint, hint);
+    if (strcmp(lv_label_get_text(s_home_link), status) != 0) {
+        set_label(s_home_link, status);
+        lv_obj_set_style_text_color(s_home_link_icon,
+                                    lv_color_hex(connected ? UI_SKY_DARK : HOME_MUTED), 0);
+    }
+    set_label(s_home_message, message);
+    if (s_octo_timer && s_page == APP_PAGE_HOME &&
+        esp_timer_get_time() - s_last_input_us < SCREEN_OFF_US) {
+        lv_timer_resume(s_octo_timer);
+    }
     bsp_lvgl_unlock();
 }
 
@@ -310,11 +338,13 @@ int64_t app_ui_last_input_us(void) {
 void app_ui_idle_tick(void) {
     if (!s_ui_ok) return;
     int64_t idle_us = esp_timer_get_time() - s_last_input_us;
-    // 录音中不熄屏：用户要能看到计时。其他页 10 秒熄屏。
-    if (s_page == APP_PAGE_RECORDING) return;
-    if (idle_us >= SCREEN_OFF_US) {
-        bsp_display_backlight(0);
+    // 录音中不熄屏；其他页到达空闲阈值时停止动画和背光。
+    if (s_page == APP_PAGE_RECORDING || idle_us < SCREEN_OFF_US) return;
+    if (s_octo_timer && bsp_lvgl_lock(200)) {
+        lv_timer_pause(s_octo_timer);
+        bsp_lvgl_unlock();
     }
+    bsp_display_backlight(0);
 }
 
 static void rec_dot_opa(void *obj, int32_t v) {

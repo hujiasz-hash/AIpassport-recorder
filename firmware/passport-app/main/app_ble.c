@@ -54,6 +54,7 @@ static void put32(uint8_t *p, uint32_t v) {
 }
 
 bool app_ble_ready(void) { return atomic_load(&ready); }
+bool app_ble_connected(void) { return atomic_load(&conn) != NO_CONN; }
 uint32_t app_ble_passkey(void) {
     if (esp_timer_get_time() / 1000000ULL >= atomic_load(&pair_until)) return UINT32_MAX;
     return atomic_load(&passkey);
@@ -268,6 +269,15 @@ static bool send(unsigned gen, const uint8_t *data, uint16_t len) {
     return false;
 }
 
+void app_ble_notify_recording(bool active, uint32_t elapsed_sec) {
+    uint16_t h = atomic_load(&conn);
+    if (!app_ble_ready() || h == NO_CONN) return;
+    uint8_t frame[6] = { 'R', active ? 1u : 0u, 0, 0, 0, 0 };
+    put32(frame + 2, active ? elapsed_sec : 0u);
+    struct os_mbuf *msg = ble_hs_mbuf_from_flat(frame, sizeof frame);
+    if (msg) (void)ble_gatts_notify_custom(h, tx_handle, msg);
+}
+
 static bool ack(unsigned gen, uint8_t kind, uint32_t *value) {
     int64_t until = esp_timer_get_time() + 2500000;
     while (app_ble_ready() && gen == atomic_load(&epoch) && esp_timer_get_time() < until) {
@@ -332,8 +342,24 @@ static void sender(void *unused) {
     (void)unused;
     unsigned seen_gen = UINT32_MAX;
     uint32_t seen_session = 0, seen_bytes = 0;
+    int64_t last_rec_beat = 0;
+    bool was_rec = false;
     for (;;) {
         ensure_advertising();
+        if (app_ble_ready()) {
+            bool rec = app_record_active();
+            int64_t now = esp_timer_get_time();
+            if (rec && (!was_rec || now - last_rec_beat >= 900000)) {
+                app_ble_notify_recording(true, app_record_elapsed_sec());
+                last_rec_beat = now;
+            } else if (!rec && was_rec) {
+                app_ble_notify_recording(false, 0);
+            }
+            was_rec = rec;
+        } else {
+            was_rec = false;
+            last_rec_beat = 0;
+        }
         if (app_ble_ready() && xSemaphoreTake(transfer, pdMS_TO_TICKS(50))) {
             unsigned gen = atomic_load(&epoch);
             int n = app_store_list(sessions, sizeof sessions / sizeof sessions[0]);

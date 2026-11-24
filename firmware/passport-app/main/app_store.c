@@ -29,10 +29,11 @@
 static const esp_partition_t *s_part;
 static audio_cache_t s_cache;
 static bool s_mounted;
-// 这块 4 KB 同时承担两件事：audio_cache 的落盘缓冲，以及上传侧读扇区的缓冲。
-// 两件事都通过 s_lock 串行，所以可以共用；C3 没有 PSRAM，省一块是一块。
+// 落盘缓冲与读缓冲必须分开：边录边传时，s_sector_buf 里可能正攒着未满一扇区的
+// 音频字节（buf_len > 0），若 app_store_read 共用同一块缓冲读已落盘扇区，会把未刷盘字节冲掉。
 static SemaphoreHandle_t s_lock;
 static uint8_t *s_sector_buf;
+static uint8_t *s_read_buf;
 
 static int flash_read(void *ctx, uint32_t off, void *buf, size_t n) {
     (void)ctx;
@@ -181,6 +182,13 @@ esp_err_t app_store_init(void) {
         s_sector_buf = heap_caps_malloc(AUDIO_CACHE_SECTOR, MALLOC_CAP_8BIT);
         if (!s_sector_buf) {
             app_error_report(APP_E402_NO_SPACE, APP_SRC_RECORD, "sector buffer alloc failed");
+            return ESP_ERR_NO_MEM;
+        }
+    }
+    if (!s_read_buf) {
+        s_read_buf = heap_caps_malloc(AUDIO_CACHE_SECTOR, MALLOC_CAP_8BIT);
+        if (!s_read_buf) {
+            app_error_report(APP_E402_NO_SPACE, APP_SRC_UPLOAD, "read buffer alloc failed");
             return ESP_ERR_NO_MEM;
         }
     }
@@ -350,18 +358,18 @@ int app_store_read(const app_session_t *s, uint32_t off, void *buf, size_t n, ui
 
     for (uint32_t k = 0; k < s->sectors && got < n; k++) {
         uint32_t idx = s->first_sector + k;
-        if (flash_read(NULL, idx * AUDIO_CACHE_SECTOR, s_sector_buf, AUDIO_CACHE_SECTOR) != 0) {
+        if (flash_read(NULL, idx * AUDIO_CACHE_SECTOR, s_read_buf, AUDIO_CACHE_SECTOR) != 0) {
             app_error_report(APP_E501_FLASH, APP_SRC_UPLOAD, "read sector %u failed", (unsigned)idx);
             rc = -1;
             break;
         }
-        if (rd32(s_sector_buf) != HDR_MAGIC || rd32(s_sector_buf + OFF_SEQ) != idx + 1) {
+        if (rd32(s_read_buf) != HDR_MAGIC || rd32(s_read_buf + OFF_SEQ) != idx + 1) {
             app_error_report(APP_E501_FLASH, APP_SRC_UPLOAD, "sector %u header invalid on read",
                              (unsigned)idx);
             rc = -1;
             break;
         }
-        uint32_t len = rd32(s_sector_buf + OFF_LEN);
+        uint32_t len = rd32(s_read_buf + OFF_LEN);
         if (len > AUDIO_CACHE_PAYLOAD_MAX) {
             app_error_report(APP_E501_FLASH, APP_SRC_UPLOAD, "sector %u len=%u bad",
                              (unsigned)idx, (unsigned)len);
@@ -376,7 +384,7 @@ int app_store_read(const app_session_t *s, uint32_t off, void *buf, size_t n, ui
         uint32_t skip = off > logical ? off - logical : 0;
         uint32_t avail = len - skip;
         uint32_t take = n - got < avail ? n - got : avail;
-        memcpy(dst + got, s_sector_buf + AUDIO_CACHE_HDR_SIZE + skip, take);
+        memcpy(dst + got, s_read_buf + AUDIO_CACHE_HDR_SIZE + skip, take);
         got += take;
         logical += len;
     }

@@ -1,5 +1,7 @@
 # AI Passport 蓝牙联调诊断状态（2026-11-23）
 
+这是当日诊断记录，不代表当前运行状态。见[当前固件交付](20261124_AI-Passport_固件交付.md)。
+
 ## 结论
 
 蓝牙连接、录音开始/停止、数据接收、结束帧都已跑通。目前的问题集中在三处：
@@ -14,7 +16,7 @@
 | --- | --- |
 | 当前运行版本 | ota_0 = `passport-app-ble-appearance-20261123.bin`，SHA256 `178049b0…` |
 | 上一版本 | `passport-app-ble-upbtn-20261123.bin`，SHA256 `24ca9135…` |
-| 原始备份 | `artifacts/passport-ble-backup-20261123/ota0-backup-20261123.bin`，SHA256 `af0a5c29…` |
+| 当时的原始备份 | SHA-256 前缀 `af0a5c29`；本地文件已清理。 |
 | 分区表 | 与参考文件一致，未改动 |
 | 广播 | 开机后常开广播，不再有 120 秒停止（已修复，见 `app_ble.c` `ensure_advertising`）；长按上键只是立即重试一次广播 |
 | 扫描响应 | 名字 `AI Passport`，并带 Appearance `0x0200`（实验，无效果） |

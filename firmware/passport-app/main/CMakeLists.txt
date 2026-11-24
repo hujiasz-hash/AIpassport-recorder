@@ -10,6 +10,7 @@ idf_component_register(
          "app_upload.c"
          "app_prov.c"
          "app_ui.c"
+         "octobara_frames.S"
          "audio_cache.c"
          "ui_pixel.c"
          "ui_pixel_math.c"
@@ -31,4 +32,9 @@ idf_component_register(
         esp_http_server
         esp-tls
         lvgl__lvgl
+)
+
+set_source_files_properties(octobara_frames.S PROPERTIES
+    COMPILE_OPTIONS "-Wa,-I${CMAKE_CURRENT_LIST_DIR}"
+    OBJECT_DEPENDS "${CMAKE_CURRENT_LIST_DIR}/octobara.rgb565"
 )

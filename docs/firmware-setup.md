@@ -1,6 +1,6 @@
 # 固件搭建说明
 
-本仓库只保存我们自己编写或修改的文件。官方固件仓库、ESP-IDF 和 Opus 源码都不入库，需要按下面步骤获取。
+官方固件仓库、ESP-IDF 和 Opus 源码不入库。当前产品固件在 `firmware/passport-app/`，版本和真机验证见[固件交付](20261124_AI-Passport_固件交付.md)。
 
 ## 1. 前置条件
 
@@ -57,9 +57,9 @@ git checkout e85197d56abe92c35a1cfb84fad85fba2545c9cc
 
 实际路径取决于目录布局。如果 `third_party` 放在别处，修改该 CMake 中的 `OPUS_DIR`。编译参数已在 CMake 中设定：`FIXED_POINT=1`、`VAR_ARRAYS`，C3 无 FPU 必须定点。
 
-## 5. 配置 Wi-Fi（产品固件不需要写代码）
+## 5. 旧版 Wi-Fi 网页配网
 
-产品固件（`firmware/passport-app`）用**网页配网**，不装 App、不写死密码：
+**当前产品固件默认走 BLE，不需要 Wi-Fi 配网。** 以下说明只适用于启用 `CONFIG_PASSPORT_WIFI_LEGACY` 的构建。
 
 1. 首次开机（NVS 里没有配置）自动进入配网页，屏幕显示热点名 `AIPassport-xxxx`（后 4 位是设备号）。
 2. 手机 Wi-Fi 连这个热点（**无密码**）。
@@ -73,14 +73,13 @@ git checkout e85197d56abe92c35a1cfb84fad85fba2545c9cc
 
 ## 6. 编译、烧录
 
+产品固件用独立构建副本：复制 `firmware/passport-app/` 的 `main/`、`CMakeLists.txt`、`partitions.csv`、`sdkconfig.defaults`，补齐官方 `components/bsp`、其组件依赖和兼容的 Opus 组件。在已加载 ESP-IDF 环境的终端，从副本目录执行：
+
 ```sh
-idf.py set-target esp32c3
-idf.py build
-idf.py -p <端口> flash monitor
+idf.py -DIDF_TARGET=esp32c3 build
 ```
 
-- Windows 端口示例：`COM3`；macOS 示例：`/dev/cu.usbmodem*`。
-- 阶段 2 烧录后，缓存分区（`cache`）不会被擦除。若要清空，见第 7 节。
+升级已有设备时，不用整套 `idf.py flash`。先识别 USB 设备，读回分区表并确认当前启动槽，备份该槽；只写该应用槽，保留分区表、配对信息和 `cache`。不能仅凭历史记录假定本次仍用 `ota_0`。Windows 端口示例：`COM3`；macOS 示例：`/dev/cu.usbmodem*`。
 
 ## 7. 缓存分区操作（阶段 2）
 
@@ -134,7 +133,7 @@ python tools/stage2/power_loss_test.py /dev/cu.usbmodem* ./pl verify
 - **USB-JTAG 卡死、串口全是 0 字节且 esptool 连不上**：C3 的 USB-Serial/JTAG 偶发会停在死会话里，USB 仍能枚举（`ioreg` 里能看到 `USB JTAG/serial debug unit`）。此时拔掉 USB 重新插，再跑 `esptool.py --chip esp32c3 -p <端口> read_mac` 验证能进 stub。2026-11-22 遇到过一次。
 - **屏幕停在 "STAGE2 boot"**：多半是缓存已满。录音循环只在每 10 秒时刷新屏幕，错误（E500）只写串口，不显示在屏幕上。此时先擦除缓存分区。
 - **企业文件标记工具（Windows）**：会给新写入的 PNG 注入 tEXt 标签，导致 lvgl 组件 CHECKSUM 校验失败。Windows 上可能需要临时绕过，Mac 上通常不存在此问题。
-- **包管理**：内网 pip 源需要认证。需要的主机端工具尽量只用标准库，本仓库的脚本都不依赖第三方包（串口监听除外，需要 `pyserial`，IDF Python 环境已包含）。
+- **包管理**：内网 pip 源需要认证。需要的主机端工具尽量只用标准库，串口监听需要 `pyserial`（IDF Python 环境已包含），重新生成 OctoBara 帧需要 Pillow，日常构建不需要 Pillow。
 - **录音数据**：录音文件属于个人数据，不入库。
 
 ## 10. NAS 接收服务

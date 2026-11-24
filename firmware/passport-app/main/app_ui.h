@@ -1,4 +1,4 @@
-// 屏幕 UI：主页（时间/电量/待传量）、录音页、配网页、错误页。
+// 屏幕 UI：主页（时间、电量、蓝牙、OctoBara）、录音页、配网页、错误页。
 // 屏幕显示简短文本；详细原因只在串口日志里。
 #pragma once
 
@@ -36,7 +36,7 @@ void app_ui_backlight(uint8_t percent);
 // 当前页。
 app_page_t app_ui_page(void);
 
-// 最近一次交互的时间戳（微秒），用于 10 秒无操作熄屏。
+// 最近一次交互的时间戳（微秒），用于无操作熄屏。
 int64_t app_ui_last_input_us(void);
 void app_ui_note_input(void);
 void app_ui_idle_tick(void);
